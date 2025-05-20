@@ -1,0 +1,3 @@
+*.json
+!usuarios.json
+__pycache__

@@ -1,0 +1,14 @@
+{
+    "brian": {
+        "senha": "f3fe5a51a2be8c6dc715028858fcba82ee021be7687e4f95b45086b8ffb1a23f",
+        "tipo": "admin"
+    },
+    "rick": {
+        "senha": "5efc60b80fa21baa18d66c9a9c33c51e2b87fba0876709d4c8909aa3ed7fbbde",
+        "tipo": "eleitor"
+    },
+    "manel": {
+        "senha": "5bcf4b8e33e5875ed808c339851f05109508c170e363b8c79b4fb093ae9a6f37",
+        "tipo": "auditor"
+    }
+}
