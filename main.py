@@ -1,3 +1,5 @@
+### arquivo: main.py
+
 import typer
 from sistema import Sistema
 from blockchain import Blockchain
@@ -31,6 +33,14 @@ def login():
         raise typer.Exit()
 
 
+def exibir_votacoes(apenas_ativas=False):
+    votacoes = sistema.listar_votacoes(apenas_ativas=apenas_ativas)
+    if not votacoes:
+        typer.echo("⚠️ Nenhuma votação disponível.")
+    for vid, nome in votacoes:
+        typer.echo(f"ID: {vid} | Nome: {nome}")
+
+
 def menu_admin(login):
     while True:
         opcao = typer.prompt(
@@ -53,18 +63,21 @@ def menu_admin(login):
                 typer.echo("⚠️ Usuário já existe.")
         elif opcao == "2":
             id_votacao = typer.prompt("ID da nova votação")
+            nome_votacao = typer.prompt("Nome da votação")
             opcoes = typer.prompt("Opções separadas por vírgula").split(",")
-            if sistema.criar_votacao(id_votacao.strip(), [o.strip() for o in opcoes]):
+            if sistema.criar_votacao(id_votacao.strip(), nome_votacao.strip(), [o.strip() for o in opcoes]):
                 typer.echo("✅ Votação criada.")
             else:
                 typer.echo("⚠️ Votação já existe.")
         elif opcao == "3":
+            exibir_votacoes(apenas_ativas=True)
             id_votacao = typer.prompt("ID da votação a encerrar")
             if sistema.encerrar_votacao(id_votacao):
                 typer.echo("✅ Votação encerrada.")
             else:
                 typer.echo("⚠️ Votação não encontrada.")
         elif opcao == "4":
+            exibir_votacoes(apenas_ativas=True)
             id_votacao = typer.prompt("ID da votação")
             eleitor_login = typer.prompt("Login do eleitor")
             if sistema.autorizar_eleitor(id_votacao, eleitor_login):
@@ -85,6 +98,7 @@ def menu_eleitor(login):
         )
 
         if opcao == "1":
+            exibir_votacoes(apenas_ativas=True)
             id_votacao = typer.prompt("ID da votação")
             if not sistema.votacao_ativa(id_votacao):
                 typer.echo("⚠️ Votação não está ativa.")
@@ -128,6 +142,7 @@ def menu_auditor():
         )
 
         if opcao == "1":
+            exibir_votacoes()
             id_votacao = typer.prompt("ID da votação")
             caminho = f"data/blockchain_votacao_{id_votacao}.json"
             if not sistema.votacao_ativa(id_votacao):
@@ -140,6 +155,7 @@ def menu_auditor():
             else:
                 typer.echo("⚠️ Votação ainda está ativa.")
         elif opcao == "2":
+            exibir_votacoes()
             id_votacao = typer.prompt("ID da votação")
             caminho = sistema.exportar_csv(id_votacao)
             if caminho:

@@ -62,18 +62,34 @@ class Sistema:
         self._salvar_usuarios()
         return True
 
-    def criar_votacao(self, id_votacao: str, opcoes: list):
+
+    def criar_votacao(self, id_votacao: str, nome_votacao: str, opcoes: list):
         if id_votacao in self.votacoes:
             return False
         self.votacoes[id_votacao] = {
+            "nome": nome_votacao,
             "opcoes": opcoes,
             "ativa": True,
             "eleitores": []
         }
         self._salvar_votacoes()
-        # Cria blockchain dessa votação
         Blockchain(f"data/blockchain_votacao_{id_votacao}.json")
         return True
+
+    def listar_votacoes(self, apenas_ativas=False):
+        """
+        Retorna lista de (id, nome) das votações.
+        """
+        resultado = []
+        for id_votacao, dados in self.votacoes.items():
+            if apenas_ativas and not dados.get("ativa", False):
+                continue
+            nome = dados.get("nome", "Sem nome")
+            resultado.append((id_votacao, nome))
+        return resultado
+
+    def obter_nome_votacao(self, id_votacao):
+        return self.votacoes.get(id_votacao, {}).get("nome", "Sem nome")
 
     def encerrar_votacao(self, id_votacao):
         if id_votacao not in self.votacoes:
