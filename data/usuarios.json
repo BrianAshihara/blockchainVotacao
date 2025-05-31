@@ -10,5 +10,9 @@
     "manel": {
         "senha": "5bcf4b8e33e5875ed808c339851f05109508c170e363b8c79b4fb093ae9a6f37",
         "tipo": "auditor"
+    },
+    "leo": {
+        "senha": "8535e86c8118bbbb0a18ac72d15d3a2b37b18d1bce1611fc60165f322cf57386",
+        "tipo": "eleitor"
     }
 }

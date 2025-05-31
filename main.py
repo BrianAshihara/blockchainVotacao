@@ -79,6 +79,16 @@ def menu_admin(login):
         elif opcao == "4":
             exibir_votacoes(apenas_ativas=True)
             id_votacao = typer.prompt("ID da votação")
+            
+            # Exibe todos os eleitores cadastrados
+            eleitores = sistema.listar_eleitores()
+            if not eleitores:
+                typer.echo("⚠️ Nenhum eleitor cadastrado.")
+                continue
+            typer.echo("Eleitores cadastrados:")
+            for eleitor in eleitores:
+                typer.echo(f"- {eleitor}")
+            
             eleitor_login = typer.prompt("Login do eleitor")
             if sistema.autorizar_eleitor(id_votacao, eleitor_login):
                 typer.echo("✅ Eleitor autorizado.")
@@ -167,4 +177,9 @@ def menu_auditor():
 
 
 if __name__ == "__main__":
-    app()
+    while True:
+        try:
+            login()
+        except typer.Exit:
+            # Quando o usuário digita Ctrl+C ou fecha o terminal, o programa encerra
+            break

@@ -133,3 +133,6 @@ class Sistema:
             writer.writerow(["Vencedor", relatorio["vencedor"]])
             writer.writerow(["Total de votos", relatorio["total"]])
         return csv_path
+
+    def listar_eleitores(self):
+        return [login for login, dados in self.usuarios.items() if dados["tipo"] == "eleitor"]
