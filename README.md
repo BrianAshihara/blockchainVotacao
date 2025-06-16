@@ -88,17 +88,6 @@ blockchainVotacao/
 | `sistema.py`    | Regras de negócio (login, autorização, criação)    |
 | `main.py`       | Interface de linha de comando                      |
 
----
-
-## 📄 Casos de Teste Sugeridos
-
-- Cadastro de usuários com sucesso
-- Criação de votação e persistência correta
-- Autorização de eleitores
-- Voto com anonimização
-- Bloqueio de votos duplicados
-- Encerramento e auditoria
-- Geração de CSV de resultado
 
 ---
 
