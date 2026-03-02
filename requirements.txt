@@ -1,0 +1,5 @@
+flask>=3.0
+requests>=2.31
+ecdsa>=0.19
+typer>=0.9
+pytest>=7.0
