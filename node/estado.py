@@ -17,9 +17,12 @@ class EstadoNo:
     Todo o file I/O de blockchain vive aqui (extraido de blockchain.py Blockchain).
     """
 
-    def __init__(self, diretorio_dados: str = "data", porta: int = 5000):
+    def __init__(self, diretorio_dados: str = "data", porta: int = 5000,
+                 usar_tls: bool = False, require_auth: bool = False):
         self.diretorio = diretorio_dados
         self.porta = porta
+        self.usar_tls = usar_tls
+        self.require_auth = require_auth
         self._lock = threading.Lock()
 
         os.makedirs(diretorio_dados, exist_ok=True)

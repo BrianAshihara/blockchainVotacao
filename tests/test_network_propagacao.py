@@ -38,13 +38,17 @@ def test_propagar_transacao_payload_correto(transacao_assinada):
 
 
 def test_propagar_transacao_peer_falha_nao_interrompe(transacao_assinada):
-    with patch("network.propagacao.requests.post") as mock_post:
+    with patch("network.propagacao.requests.post") as mock_post, \
+         patch("network.propagacao.time.sleep"):
+        # peer1 falha 3x (retry esgotado), peer2 sucesso na 1a tentativa
         mock_post.side_effect = [
             requests.exceptions.ConnectionError("falha"),
-            MagicMock()
+            requests.exceptions.ConnectionError("falha"),
+            requests.exceptions.ConnectionError("falha"),
+            MagicMock(status_code=201)
         ]
         propagar_transacao(transacao_assinada, ["peer1:5000", "peer2:5001"], 5000)
-    assert mock_post.call_count == 2
+    assert mock_post.call_count == 4
 
 
 def test_propagar_transacao_sem_peers(transacao_assinada):
@@ -70,13 +74,17 @@ def test_propagar_bloco_payload_correto(bloco_genesis):
 
 
 def test_propagar_bloco_peer_falha_nao_interrompe(bloco_genesis):
-    with patch("network.propagacao.requests.post") as mock_post:
+    with patch("network.propagacao.requests.post") as mock_post, \
+         patch("network.propagacao.time.sleep"):
+        # peer1 falha 3x (retry esgotado), peer2 sucesso na 1a tentativa
         mock_post.side_effect = [
             requests.exceptions.ConnectionError("falha"),
-            MagicMock()
+            requests.exceptions.ConnectionError("falha"),
+            requests.exceptions.ConnectionError("falha"),
+            MagicMock(status_code=201)
         ]
         propagar_bloco(bloco_genesis, ["peer1:5000", "peer2:5001"], 5000)
-    assert mock_post.call_count == 2
+    assert mock_post.call_count == 4
 
 
 # ==================== propagar_votacao ====================

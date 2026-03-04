@@ -1,5 +1,7 @@
 import threading
+from datetime import datetime, timezone
 
+import requests
 from flask import Flask, request, jsonify
 
 from node.estado import EstadoNo
@@ -8,6 +10,7 @@ from core.bloco import Bloco
 from core.validacao import validar_transacao, validar_bloco
 from core.cadeia import verificar_integridade, gerar_relatorio
 from core.mineracao import minerar_bloco
+from core.cripto import verificar_assinatura
 
 
 def criar_app(estado: EstadoNo) -> Flask:
@@ -69,11 +72,10 @@ def criar_app(estado: EstadoNo) -> Flask:
         if not adicionada:
             return jsonify({"mensagem": "Transacao ja conhecida"}), 200
 
-        # Import here to avoid circular imports
         from network.propagacao import propagar_transacao
         threading.Thread(
             target=propagar_transacao,
-            args=(tx, estado.peers.listar(), estado.porta),
+            args=(tx, estado.peers.listar(), estado.porta, estado.usar_tls),
             daemon=True
         ).start()
 
@@ -133,7 +135,7 @@ def criar_app(estado: EstadoNo) -> Flask:
         from network.propagacao import propagar_bloco
         threading.Thread(
             target=propagar_bloco,
-            args=(novo_bloco, estado.peers.listar(), estado.porta),
+            args=(novo_bloco, estado.peers.listar(), estado.porta, estado.usar_tls),
             daemon=True
         ).start()
 
@@ -153,11 +155,32 @@ def criar_app(estado: EstadoNo) -> Flask:
         """
         Registra um novo peer.
         Body: {"endereco": "host:port"}
+        Com autenticacao: inclui id_no, chave_publica, timestamp, assinatura.
         """
         dados = request.get_json()
         endereco = dados.get("endereco")
         if not endereco:
             return jsonify({"erro": "Endereco obrigatorio"}), 400
+
+        assinatura = dados.get("assinatura")
+        if assinatura:
+            chave_publica = dados.get("chave_publica", "")
+            timestamp_str = dados.get("timestamp", "")
+
+            dados_assinados = f"{endereco}:{timestamp_str}"
+            if not verificar_assinatura(chave_publica, dados_assinados, assinatura):
+                return jsonify({"erro": "Assinatura invalida"}), 401
+
+            try:
+                ts = datetime.fromisoformat(timestamp_str)
+                agora = datetime.now(timezone.utc)
+                if abs((agora - ts).total_seconds()) > 300:
+                    return jsonify({"erro": "Timestamp expirado (max 5 min)"}), 401
+            except (ValueError, TypeError):
+                return jsonify({"erro": "Timestamp invalido"}), 400
+
+        elif estado.require_auth:
+            return jsonify({"erro": "Autenticacao obrigatoria"}), 401
 
         novo = estado.peers.adicionar(endereco)
         return jsonify({
@@ -198,7 +221,7 @@ def criar_app(estado: EstadoNo) -> Flask:
         from network.propagacao import propagar_votacao
         threading.Thread(
             target=propagar_votacao,
-            args=(dados, estado.peers.listar(), estado.porta),
+            args=(dados, estado.peers.listar(), estado.porta, estado.usar_tls),
             daemon=True
         ).start()
         return jsonify({"mensagem": "Propagacao iniciada"})
@@ -223,6 +246,37 @@ def criar_app(estado: EstadoNo) -> Flask:
             "transacoes_pendentes": estado.mempool.tamanho(),
             "peers": estado.peers.quantidade(),
             "porta": estado.porta
+        })
+
+    # --- Health check endpoint ---
+
+    @app.route("/no/saude", methods=["GET"])
+    def saude_no():
+        """Verificacao de saude do no com status de peers."""
+        peers = estado.peers.listar()
+        protocolo = "https" if estado.usar_tls else "http"
+        peers_alcancaveis = 0
+
+        for peer in peers:
+            try:
+                resp = requests.get(
+                    f"{protocolo}://{peer}/no/info",
+                    timeout=2
+                )
+                if resp.status_code == 200:
+                    peers_alcancaveis += 1
+            except requests.exceptions.RequestException:
+                pass
+
+        return jsonify({
+            "status": "ok",
+            "id_no": estado.identidade.id_no,
+            "comprimento_chain": estado.comprimento_chain(),
+            "chain_valida": verificar_integridade(estado.blocos),
+            "transacoes_pendentes": estado.mempool.tamanho(),
+            "peers_conhecidos": len(peers),
+            "peers_alcancaveis": peers_alcancaveis,
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
 
     return app

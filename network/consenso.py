@@ -10,7 +10,8 @@ logger = logging.getLogger(__name__)
 TIMEOUT_REQUISICAO = 10
 
 
-def resolver_conflitos(blocos_locais: List[Bloco], peers: List[str]) -> Optional[List[Bloco]]:
+def resolver_conflitos(blocos_locais: List[Bloco], peers: List[str],
+                       usar_tls: bool = False) -> Optional[List[Bloco]]:
     """
     Implementa consenso por cadeia mais longa (Nakamoto consensus).
 
@@ -26,10 +27,12 @@ def resolver_conflitos(blocos_locais: List[Bloco], peers: List[str]) -> Optional
     melhor_chain: Optional[List[Bloco]] = None
     maior_comprimento = comprimento_local
 
+    protocolo = "https" if usar_tls else "http"
+
     for peer in peers:
         try:
             resp_comp = requests.get(
-                f"http://{peer}/chain/comprimento",
+                f"{protocolo}://{peer}/chain/comprimento",
                 timeout=TIMEOUT_REQUISICAO
             )
             comp_remoto = resp_comp.json()["comprimento"]
@@ -38,7 +41,7 @@ def resolver_conflitos(blocos_locais: List[Bloco], peers: List[str]) -> Optional
                 continue
 
             resp_chain = requests.get(
-                f"http://{peer}/chain",
+                f"{protocolo}://{peer}/chain",
                 timeout=TIMEOUT_REQUISICAO
             )
             dados = resp_chain.json()

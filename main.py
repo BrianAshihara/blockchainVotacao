@@ -1,6 +1,7 @@
 ### arquivo: main.py
 ### CLI adaptado para comunicar com o no local via HTTP
 
+import os
 import typer
 import requests
 
@@ -12,8 +13,8 @@ from core.cripto import assinar
 
 app = typer.Typer()
 
-# Porta do no local (pode ser configurada via env ou argumento)
-NODE_URL = "http://localhost:5000"
+# Endereco do no (configuravel via variavel de ambiente NODE_URL)
+NODE_URL = os.environ.get("NODE_URL", "http://localhost:5000")
 
 
 def _node_url():
