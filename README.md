@@ -63,7 +63,7 @@ blockchainVotacao/
 │   ├── test_node_identidade.py   # Testes de identidade do no
 │   ├── test_node_registro_peers.py # Testes de registro de peers
 │   ├── test_node_estado.py       # Testes do estado do no
-│   ├── test_node_api.py          # Testes dos 15 endpoints Flask
+│   ├── test_node_api.py          # Testes dos 16 endpoints Flask
 │   ├── test_network_propagacao.py # Testes de propagacao P2P
 │   ├── test_network_consenso.py  # Testes de consenso Nakamoto
 │   ├── test_network_sincronizacao.py # Testes de sincronizacao
@@ -276,37 +276,79 @@ Cada no expoe os seguintes endpoints:
 | GET | `/votacoes` | Listar sessoes de votacao (para sync entre nos) |
 | POST | `/votacao` | Receber sessao de votacao (de peers) |
 | POST | `/votacao/propagar` | Broadcast de sessao de votacao para peers |
-| GET | `/votacao/relatorio/<id>` | Relatorio de votacao |
+| GET | `/votacao/relatorio/<id>` | Relatorio de votacao (slim com sessao ativa, completo apos encerramento) |
+| GET | `/votacao/contagem/<id>` | Contagem leve de votos confirmados on-chain (publico, qualquer estado) |
 | GET | `/no/info` | Informacoes do no |
 | GET | `/no/saude` | Health check com status de peers alcancaveis |
 
 ---
 
-## Tipos de Usuarios
+## Mudancas de Escopo (Atualizacao)
 
-- **Administrador**: cadastra usuarios, cria/encerra votacoes, autoriza eleitores, minera blocos.
-- **Eleitor**: visualiza votacoes ativas e vota (voto assinado com chave privada ECDSA).
-- **Auditor**: visualiza resultados, exporta relatorios CSV, verifica integridade da cadeia.
+Esta secao resume as mudancas de escopo aplicadas sobre o sistema base. Todas mantem retrocompatibilidade com `chain.json`, `votacoes.json` e `usuarios.json` existentes.
 
-> **Login de desenvolvimento:** O sistema inclui um login admin embutido (`login: admin` / `senha: admin`) para facilitar o acesso durante desenvolvimento e debug. Esse login funciona sem necessidade de cadastro em `usuarios.json`.
+### Hierarquia de papeis (3 papeis)
+
+| Papel | Origem | Permissoes |
+|---|---|---|
+| **master** | Hardcoded (`login: admin` / `senha: admin`) | Todas as acoes de admin. Nao pode ser cadastrado, removido nem promovido. |
+| **admin** | Eleitor promovido por outro admin ou pelo master | Criar votacoes, autorizar eleitores, encerrar votacoes, minerar, promover outros eleitores, ver relatorios. |
+| **eleitor** | Auto-cadastro via CLI | Listar suas votacoes ativas, votar, ver resultado de sessoes encerradas em que participou. |
+
+> **Sem democao.** Promocao e unidirecional (eleitor → admin). O papel `auditor` foi removido — registros existentes com `tipo=auditor` em `usuarios.json` simplesmente nao tem menu disponivel.
+
+### Auto-cadastro de eleitor
+
+Ao executar `python main.py login`, digite `REGISTRAR` no campo de login para iniciar o auto-cadastro. O eleitor escolhe login + senha e o sistema gera um par de chaves ECDSA SECP256k1 automaticamente. Nenhum admin precisa intervir.
+
+### Promocao de eleitor para admin
+
+Disponivel no menu admin (opcao 1). O master ou qualquer admin pode promover um eleitor existente para admin. Master e identificado pelo login hardcoded `admin` e nao aparece em `usuarios.json`.
+
+### Visibilidade do resultado
+
+- **Sessao ativa:** `GET /votacao/relatorio/<id>` retorna apenas a contagem total de votos confirmados on-chain (sem breakdown por candidato, sem vencedor). O endpoint leve `GET /votacao/contagem/<id>` tambem expoe esse total.
+- **Sessao encerrada:** `GET /votacao/relatorio/<id>` retorna o relatorio completo (percentuais por candidato, vencedor, blocos com votos, hash do ultimo bloco com voto, total de eleitores autorizados).
+- **Apos votar:** o eleitor ve apenas `"Seu voto foi computado."`, o `tx_hash` como comprovante, e o total atual de votos confirmados — nunca o seu proprio voto ou o breakdown.
+
+### Ciclo de vida da sessao (ja implementado)
+
+- Sessoes possuem `inicio` e `fim` em ISO 8601 UTC.
+- Encerramento manual (admin) ou automatico (daemon a cada 30s detecta `fim <= agora`).
+- **Mine-on-close:** antes de marcar `ativa=False`, o no minera quaisquer transacoes pendentes da sessao para que nenhum voto valido seja perdido.
+- Encerramento e criacao sao propagados a todos os peers via `POST /votacao`.
+
+### Mineracao automatica (ja implementado)
+
+Todo no roda um daemon que, a cada 30 segundos, minera as transacoes pendentes da mempool e propaga o bloco aos peers. Thread-safe via `_mining_lock` (exclusao mutua entre daemon, mine-on-close e `POST /minerar`).
+
+---
+
+## Tipos de Usuarios (resumo)
+
+- **Master** (hardcoded `admin`/`admin`): mesmo menu do admin. Nao pode ser removido.
+- **Admin**: cria/encerra votacoes (com `inicio`/`fim`), autoriza eleitores, minera, promove outros eleitores, ve relatorios.
+- **Eleitor**: auto-cadastro, lista suas votacoes ativas autorizadas, vota, ve resultado de sessoes encerradas em que participou.
 
 ---
 
 ## Fluxo de Votacao
 
-1. **Admin** cria uma sessao de votacao com ID e opcoes.
-   - A sessao e **propagada automaticamente** para todos os peers da rede.
-2. **Admin** autoriza eleitores para a sessao (local por no).
-3. **Eleitor** faz login, escolhe uma opcao e submete o voto.
-   - O CLI **assina a transacao localmente** com a chave privada do eleitor (ECDSA).
-   - A chave privada **nunca sai do processo local** — o no recebe apenas a transacao ja assinada.
-   - O no valida a assinatura, verifica voto duplicado e adiciona a mempool.
+1. **Eleitor** se auto-cadastra na CLI (digitando `REGISTRAR` no campo login).
+2. **Admin** (ou master) cria uma sessao com ID, opcoes, `inicio` e `fim`.
+   - A sessao e **propagada automaticamente** para todos os peers.
+3. **Admin** autoriza eleitores para a sessao (local por no).
+4. **Eleitor** faz login, lista suas votacoes ativas, escolhe uma e submete o voto.
+   - O CLI **assina a transacao localmente** com a chave privada (ECDSA SECP256k1).
+   - A chave privada **nunca sai do processo local**.
+   - O no valida (5 checks: campos, assinatura, sem voto duplo, mempool, sessao ativa+periodo) e adiciona a mempool.
    - A transacao e propagada para todos os peers.
-4. **Admin** (ou qualquer no) minera um bloco, incluindo as transacoes pendentes.
-   - O bloco minerado e propagado para a rede.
-5. **Admin** encerra a votacao.
-   - O encerramento e **propagado para todos os peers**.
-6. **Auditor** consulta o resultado ou exporta CSV.
+   - O eleitor ve `"Seu voto foi computado."` + `tx_hash` + total atual de votos confirmados.
+5. **Auto-miner** (daemon, 30s) minera o bloco e propaga aos peers — sem acao manual.
+6. **Encerramento:**
+   - Manual: admin escolhe a opcao no menu (executa mine-on-close antes).
+   - Automatico: daemon detecta `fim <= agora`, minera pendentes da sessao, encerra e propaga.
+7. **Relatorio publico:** apos encerramento, qualquer no expoe o relatorio completo via `GET /votacao/relatorio/<id>`.
 
 ---
 
@@ -327,18 +369,21 @@ Cada no expoe os seguintes endpoints:
 
 ## Testes
 
-O projeto possui **265 testes** (255 unitarios + 10 de integracao), organizados com `pytest`.
+O projeto possui **300 testes** (288 unitarios + 12 de integracao), organizados com `pytest`.
 
 ### Executar os testes
 
 ```bash
-# Rodar todos os testes (unitarios + integracao)
+# Rodar todos os testes (unitarios + integracao) — ~10s
+python -m pytest tests/
+
+# Com saida verbosa
 python -m pytest tests/ -v
 
-# Rodar apenas testes unitarios (rapido, ~2s)
-python -m pytest tests/ -v --ignore=tests/test_integracao_rede.py
+# Rodar apenas testes unitarios (rapido, ~5s)
+python -m pytest tests/ --ignore=tests/test_integracao_rede.py
 
-# Rodar apenas testes de integracao (inicia 3 nos reais, ~10s)
+# Rodar apenas testes de integracao (inicia 3 nos reais, ~6s)
 python -m pytest tests/test_integracao_rede.py -v
 
 # Rodar testes de um modulo especifico
@@ -346,20 +391,20 @@ python -m pytest tests/test_core_cripto.py -v
 
 # Rodar com relatorio de cobertura (requer pytest-cov)
 pip install pytest-cov
-python -m pytest tests/ -v --cov=core --cov=node --cov=network --cov=sistema
+python -m pytest tests/ --cov=core --cov=node --cov=network --cov=sistema
 ```
 
-### Cobertura por camada — Testes Unitarios (255)
+### Cobertura por camada — Testes Unitarios (288)
 
 | Camada | Arquivos de Teste | Testes | O que cobre |
 |--------|-------------------|--------|-------------|
-| `core/` | 7 arquivos | 111 | Criptografia ECDSA, transacoes, blocos, cadeia, validacao, mempool, mineracao PoW |
-| `node/` | 4 arquivos | 66 | Identidade, registro de peers, estado do no, todos os 15 endpoints da API Flask |
+| `core/` | 7 arquivos | 119 | Criptografia ECDSA, transacoes, blocos, cadeia (incluindo `contar_votos` e relatorio enriquecido), validacao (com check de sessao ativa), mempool, mineracao PoW |
+| `node/` | 4 arquivos | 74 | Identidade, registro de peers, estado do no com `_mining_lock`, todos os endpoints Flask incluindo `/votacao/contagem` e relatorio slim/completo |
 | `network/` | 3 arquivos | 36 | Propagacao HTTP, consenso Nakamoto, sincronizacao com recuperacao de txs orfas |
-| `sistema/` | 3 arquivos | 42 | Autenticacao (incl. admin hardcoded), CRUD de votacoes, exportacao CSV |
-| **Total** | **17 arquivos** | **255** | **Cobertura completa de todos os modulos** |
+| `sistema/` | 3 arquivos | 59 | Autenticacao (master hardcoded, auto-cadastro, promocao, listar admins), CRUD de votacoes (com inicio/fim), exportacao CSV com percentual |
+| **Total** | **17 arquivos** | **288** | **Cobertura completa de todos os modulos** |
 
-### Testes de Integracao (10)
+### Testes de Integracao (12)
 
 O arquivo `tests/test_integracao_rede.py` testa a rede P2P de ponta a ponta, **sem mocks**. Ele inicia 3 nos reais como subprocessos na mesma maquina (portas 5050-5052) com `--host 127.0.0.1` e executa um fluxo completo de votacao:
 
@@ -372,7 +417,9 @@ O arquivo `tests/test_integracao_rede.py` testa a rede P2P de ponta a ponta, **s
 | `test_05_transacao_propaga_para_peers` | Transacao submetida ao A aparece na mempool de B e C |
 | `test_06_minerar_bloco_e_propaga` | Bloco minerado no A propaga para B e C |
 | `test_07_mempool_vazia_apos_mineracao` | Mempool limpa em todos os nos apos mineracao |
-| `test_08_relatorio_votacao_correto` | Relatorio mostra contagem correta de votos |
+| `test_08a_relatorio_slim_durante_sessao_ativa` | Relatorio slim (sem breakdown) enquanto sessao esta ativa |
+| `test_08b_contagem_endpoint_publico` | `/votacao/contagem/<id>` retorna total em qualquer estado |
+| `test_08c_relatorio_completo_apos_encerramento` | Apos encerrar e propagar, relatorio completo expoe breakdown e vencedor |
 | `test_09_integridade_chain_todos_nos` | Chain valida e integra em todos os nos |
 | `test_10_chains_identicas_em_todos_nos` | Todos os nos tem exatamente a mesma blockchain |
 

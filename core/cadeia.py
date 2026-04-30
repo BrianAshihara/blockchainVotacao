@@ -54,27 +54,63 @@ def eleitor_ja_votou(blocos: List[Bloco], chave_publica: str, id_votacao: str) -
     return False
 
 
-def gerar_relatorio(blocos: List[Bloco], id_votacao: str) -> dict:
+def gerar_relatorio(blocos: List[Bloco], id_votacao: str, dados_votacao: dict = None) -> dict:
     """
     Contabiliza votos para uma votacao especifica.
-    Adaptado de blockchain.py Blockchain.gerar_relatorio().
+    Se dados_votacao fornecido, inclui metadados da sessao no relatorio.
     """
     resultados = {}
+    blocos_com_votos = []
     for bloco in blocos:
+        bloco_tem_voto = False
         for tx in bloco.transacoes:
             if tx.id_votacao == id_votacao:
                 escolha = tx.escolha
                 resultados[escolha] = resultados.get(escolha, 0) + 1
+                bloco_tem_voto = True
+        if bloco_tem_voto:
+            blocos_com_votos.append(bloco)
+
+    total = sum(resultados.values())
 
     if not resultados:
-        return {"vencedor": None, "total": 0, "detalhes": {}}
+        vencedor = None
+        detalhes = {}
+    else:
+        vencedor = max(resultados, key=resultados.get)
+        detalhes = {}
+        for opcao, votos in resultados.items():
+            detalhes[opcao] = {
+                "votos": votos,
+                "percentual": round((votos / total) * 100, 2)
+            }
 
-    vencedor = max(resultados, key=resultados.get)
-    return {
+    relatorio = {
         "vencedor": vencedor,
-        "total": sum(resultados.values()),
-        "detalhes": resultados
+        "total": total,
+        "total_votos_confirmados": total,
+        "detalhes": detalhes,
+        "blocos_com_votos": len(blocos_com_votos),
+        "hash_ultimo_bloco_com_votos": blocos_com_votos[-1].hash_atual if blocos_com_votos else None
     }
+
+    if dados_votacao:
+        relatorio["nome_votacao"] = dados_votacao.get("nome")
+        relatorio["inicio"] = dados_votacao.get("inicio")
+        relatorio["fim"] = dados_votacao.get("fim")
+        relatorio["total_eleitores_autorizados"] = len(dados_votacao.get("eleitores", []))
+
+    return relatorio
+
+
+def contar_votos(blocos: List[Bloco], id_votacao: str) -> int:
+    """Retorna o numero de votos confirmados on-chain para uma votacao."""
+    total = 0
+    for bloco in blocos:
+        for tx in bloco.transacoes:
+            if tx.id_votacao == id_votacao:
+                total += 1
+    return total
 
 
 def ultimo_bloco(blocos: List[Bloco]) -> Bloco:

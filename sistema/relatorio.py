@@ -19,9 +19,12 @@ def exportar_csv(blocos: List[Bloco], id_votacao: str, caminho_saida: str = None
     os.makedirs(os.path.dirname(caminho_saida), exist_ok=True)
     with open(caminho_saida, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(["Opcao", "Total de Votos"])
-        for opcao, total in relatorio["detalhes"].items():
-            writer.writerow([opcao, total])
+        writer.writerow(["Opcao", "Total de Votos", "Percentual"])
+        for opcao, info in relatorio["detalhes"].items():
+            if isinstance(info, dict):
+                writer.writerow([opcao, info["votos"], f'{info["percentual"]}%'])
+            else:
+                writer.writerow([opcao, info, ""])
         writer.writerow([])
         writer.writerow(["Vencedor", relatorio["vencedor"]])
         writer.writerow(["Total de votos", relatorio["total"]])

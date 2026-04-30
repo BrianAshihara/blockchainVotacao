@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime, timezone
 
 CAMINHO_VOTACOES_PADRAO = "data/votacoes.json"
 
@@ -19,16 +20,21 @@ def _salvar_votacoes(votacoes: dict, caminho: str = None):
         json.dump(votacoes, f, indent=4)
 
 
-def criar_votacao(id_votacao: str, nome_votacao: str, opcoes: list, caminho: str = None) -> bool:
+def criar_votacao(id_votacao: str, nome_votacao: str, opcoes: list,
+                  inicio: str = None, fim: str = None, caminho: str = None) -> bool:
     """Cria uma nova sessao de votacao."""
     votacoes = _carregar_votacoes(caminho)
     if id_votacao in votacoes:
         return False
+    if inicio is None:
+        inicio = datetime.now(timezone.utc).isoformat()
     votacoes[id_votacao] = {
         "nome": nome_votacao,
         "opcoes": opcoes,
         "ativa": True,
-        "eleitores": []
+        "eleitores": [],
+        "inicio": inicio,
+        "fim": fim
     }
     _salvar_votacoes(votacoes, caminho)
     return True
@@ -76,7 +82,17 @@ def eleitor_autorizado(id_votacao: str, login_eleitor: str, caminho: str = None)
 
 def votacao_ativa(id_votacao: str, caminho: str = None) -> bool:
     votacoes = _carregar_votacoes(caminho)
-    return votacoes.get(id_votacao, {}).get("ativa", False)
+    dados = votacoes.get(id_votacao, {})
+    if not dados.get("ativa", False):
+        return False
+    agora = datetime.now(timezone.utc)
+    inicio = dados.get("inicio")
+    if inicio and datetime.fromisoformat(inicio) > agora:
+        return False
+    fim = dados.get("fim")
+    if fim and datetime.fromisoformat(fim) < agora:
+        return False
+    return True
 
 
 def opcoes_disponiveis(id_votacao: str, caminho: str = None) -> list:
@@ -94,7 +110,9 @@ def obter_votacao_dict(id_votacao: str, caminho: str = None) -> dict | None:
         "id_votacao": id_votacao,
         "nome": dados["nome"],
         "opcoes": dados["opcoes"],
-        "ativa": dados["ativa"]
+        "ativa": dados["ativa"],
+        "inicio": dados.get("inicio"),
+        "fim": dados.get("fim")
     }
 
 
@@ -107,7 +125,9 @@ def obter_todas_votacoes_dict(caminho: str = None) -> list[dict]:
             "id_votacao": id_votacao,
             "nome": dados["nome"],
             "opcoes": dados["opcoes"],
-            "ativa": dados["ativa"]
+            "ativa": dados["ativa"],
+            "inicio": dados.get("inicio"),
+            "fim": dados.get("fim")
         })
     return resultado
 
@@ -127,7 +147,9 @@ def merge_votacao(dados_votacao: dict, caminho: str = None) -> bool:
             "nome": dados_votacao["nome"],
             "opcoes": dados_votacao["opcoes"],
             "ativa": dados_votacao["ativa"],
-            "eleitores": []
+            "eleitores": [],
+            "inicio": dados_votacao.get("inicio"),
+            "fim": dados_votacao.get("fim")
         }
         _salvar_votacoes(votacoes, caminho)
         return True
@@ -139,3 +161,37 @@ def merge_votacao(dados_votacao: dict, caminho: str = None) -> bool:
         return True
 
     return False
+
+
+def listar_votacoes_expiradas(caminho: str = None) -> list[str]:
+    """Retorna IDs de sessoes onde ativa==True mas fim ja passou."""
+    votacoes = _carregar_votacoes(caminho)
+    agora = datetime.now(timezone.utc)
+    expiradas = []
+    for id_votacao, dados in votacoes.items():
+        if not dados.get("ativa", False):
+            continue
+        fim = dados.get("fim")
+        if fim and datetime.fromisoformat(fim) <= agora:
+            expiradas.append(id_votacao)
+    return expiradas
+
+
+def listar_votacoes_eleitor(login_eleitor: str, apenas_ativas: bool = False,
+                            caminho: str = None) -> list[tuple[str, str]]:
+    """Retorna votacoes que o eleitor esta autorizado a participar."""
+    votacoes = _carregar_votacoes(caminho)
+    resultado = []
+    for id_votacao, dados in votacoes.items():
+        if login_eleitor not in dados.get("eleitores", []):
+            continue
+        if apenas_ativas and not votacao_ativa(id_votacao, caminho):
+            continue
+        resultado.append((id_votacao, dados.get("nome", "Sem nome")))
+    return resultado
+
+
+def obter_total_eleitores(id_votacao: str, caminho: str = None) -> int:
+    """Retorna o numero de eleitores autorizados para uma votacao."""
+    votacoes = _carregar_votacoes(caminho)
+    return len(votacoes.get(id_votacao, {}).get("eleitores", []))

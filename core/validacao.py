@@ -6,7 +6,8 @@ from core.cripto import verificar_assinatura
 from core import cadeia
 
 
-def validar_transacao(tx: Transacao, blocos: List[Bloco], mempool_txs: List[Transacao]) -> tuple[bool, str]:
+def validar_transacao(tx: Transacao, blocos: List[Bloco], mempool_txs: List[Transacao],
+                      caminho_votacoes: str = None) -> tuple[bool, str]:
     """
     Valida uma transacao antes de aceitar na mempool.
 
@@ -15,6 +16,7 @@ def validar_transacao(tx: Transacao, blocos: List[Bloco], mempool_txs: List[Tran
     2. Assinatura valida
     3. Eleitor nao votou na chain (double-vote)
     4. Eleitor nao tem tx pendente na mempool para mesma votacao
+    5. Sessao de votacao ativa e dentro do periodo
     """
     if not all([tx.id_votacao, tx.chave_publica, tx.escolha, tx.assinatura]):
         return False, "Campos obrigatorios ausentes"
@@ -28,6 +30,11 @@ def validar_transacao(tx: Transacao, blocos: List[Bloco], mempool_txs: List[Tran
     for pendente in mempool_txs:
         if pendente.chave_publica == tx.chave_publica and pendente.id_votacao == tx.id_votacao:
             return False, "Eleitor ja tem voto pendente nesta votacao (na mempool)"
+
+    if caminho_votacoes is not None:
+        from sistema.votacao import votacao_ativa
+        if not votacao_ativa(tx.id_votacao, caminho=caminho_votacoes):
+            return False, "Votacao nao esta ativa ou fora do periodo"
 
     return True, ""
 

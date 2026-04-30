@@ -3,6 +3,7 @@ import threading
 import logging
 import json
 import os
+import time
 
 from node.estado import EstadoNo
 from node.api import criar_app
@@ -12,6 +13,47 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
+
+
+def loop_mineracao_automatica(estado, intervalo: int = 30):
+    """Daemon que minera automaticamente a cada intervalo se houver txs pendentes."""
+    logger = logging.getLogger("auto_miner")
+    while True:
+        time.sleep(intervalo)
+        if estado.mempool.tamanho() == 0:
+            continue
+        novo_bloco = estado.minerar_pendentes()
+        if novo_bloco is not None:
+            logger.info(f"Auto-minerado bloco {novo_bloco.indice} com {len(novo_bloco.transacoes)} tx(s)")
+            from network.propagacao import propagar_bloco
+            propagar_bloco(novo_bloco, estado.peers.listar(), estado.porta, estado.usar_tls)
+
+
+def loop_encerramento_automatico(estado, intervalo: int = 30):
+    """Daemon que encerra automaticamente sessoes cujo fim passou."""
+    logger = logging.getLogger("auto_close")
+    while True:
+        time.sleep(intervalo)
+        from sistema.votacao import listar_votacoes_expiradas, encerrar_votacao, obter_votacao_dict
+        expiradas = listar_votacoes_expiradas(caminho=estado.caminho_votacoes)
+
+        for id_votacao in expiradas:
+            txs_pendentes = [tx for tx in estado.mempool.listar()
+                             if tx.id_votacao == id_votacao]
+            if txs_pendentes:
+                logger.info(f"Sessao {id_votacao} expirada com {len(txs_pendentes)} voto(s) pendente(s). Minerando.")
+                novo_bloco = estado.minerar_pendentes()
+                if novo_bloco:
+                    from network.propagacao import propagar_bloco
+                    propagar_bloco(novo_bloco, estado.peers.listar(), estado.porta, estado.usar_tls)
+
+            encerrar_votacao(id_votacao, caminho=estado.caminho_votacoes)
+            logger.info(f"Sessao {id_votacao} encerrada automaticamente.")
+
+            dados = obter_votacao_dict(id_votacao, caminho=estado.caminho_votacoes)
+            if dados:
+                from network.propagacao import propagar_votacao
+                propagar_votacao(dados, estado.peers.listar(), estado.porta, estado.usar_tls)
 
 
 def main():
@@ -69,6 +111,18 @@ def main():
     threading.Thread(
         target=loop_verificacao_peers,
         args=(estado, endereco_proprio),
+        daemon=True
+    ).start()
+
+    threading.Thread(
+        target=loop_mineracao_automatica,
+        args=(estado,),
+        daemon=True
+    ).start()
+
+    threading.Thread(
+        target=loop_encerramento_automatico,
+        args=(estado,),
         daemon=True
     ).start()
 

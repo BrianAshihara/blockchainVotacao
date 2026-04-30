@@ -34,7 +34,8 @@ def test_exportar_csv_cabecalho_correto(tmp_path, chain_com_um_bloco):
     with open(caminho, "r") as f:
         reader = csv.reader(f)
         header = next(reader)
-    assert header == ["Opcao", "Total de Votos"]
+    # Novo formato inclui coluna "Percentual"
+    assert header == ["Opcao", "Total de Votos", "Percentual"]
 
 
 def test_exportar_csv_dados_corretos(tmp_path, chain_com_dois_blocos):
@@ -48,6 +49,18 @@ def test_exportar_csv_dados_corretos(tmp_path, chain_com_dois_blocos):
     opcoes_dict = {row[0]: int(row[1]) for row in opcoes_linhas}
     assert opcoes_dict["Alice"] == 1
     assert opcoes_dict["Bob"] == 1
+
+
+def test_exportar_csv_inclui_percentual(tmp_path, chain_com_dois_blocos):
+    """Cada opcao deve ter coluna de percentual no CSV."""
+    caminho = str(tmp_path / "relatorio.csv")
+    exportar_csv(chain_com_dois_blocos, "vot1", caminho_saida=caminho)
+    with open(caminho, "r") as f:
+        reader = csv.reader(f)
+        linhas = list(reader)
+    opcoes_linhas = linhas[1:3]
+    for row in opcoes_linhas:
+        assert "%" in row[2], f"Linha {row} deveria ter percentual na 3a coluna"
 
 
 def test_exportar_csv_vencedor_correto(

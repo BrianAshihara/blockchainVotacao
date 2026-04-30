@@ -1,7 +1,7 @@
 """
 Testes para node/api.py
 
-Cobre todos os 14 endpoints Flask via test_client.
+Cobre todos os endpoints Flask via test_client.
 Usa unittest.mock.patch para threads de propagacao (previne HTTP real).
 """
 
@@ -12,8 +12,14 @@ from core.bloco import Bloco
 from core.cripto import gerar_par_chaves, assinar
 from core.mineracao import minerar_bloco
 from core.cadeia import criar_bloco_genesis
+from sistema.votacao import criar_votacao, encerrar_votacao
 
 DIFICULDADE_TESTE = 1
+
+
+def _criar_votacao_ativa(estado, id_votacao="vot1", nome="Eleicao Teste"):
+    """Helper: cria sessao de votacao ativa para que validar_transacao aceite votos."""
+    criar_votacao(id_votacao, nome, ["Alice", "Bob"], caminho=estado.caminho_votacoes)
 
 
 # ==================== Chain endpoints ====================
@@ -59,12 +65,30 @@ def test_get_chain_integridade_chain_corrompida(app_client, transacao_assinada):
 
 def test_post_transacao_valida(app_client, transacao_assinada):
     client, estado = app_client
+    _criar_votacao_ativa(estado)
     with patch("node.api.threading.Thread") as mock_thread:
         mock_thread.return_value = MagicMock()
         resp = client.post("/transacao", json=transacao_assinada.to_dict())
     assert resp.status_code == 201
     data = resp.get_json()
     assert "tx_hash" in data
+
+
+def test_post_transacao_rejeita_sessao_inexistente(app_client, transacao_assinada):
+    """Check #5: votacao deve estar ativa. Sem sessao em votacoes.json, rejeita."""
+    client, estado = app_client
+    resp = client.post("/transacao", json=transacao_assinada.to_dict())
+    assert resp.status_code == 400
+    assert "ativa" in resp.get_json()["erro"].lower() or "periodo" in resp.get_json()["erro"].lower()
+
+
+def test_post_transacao_rejeita_sessao_encerrada(app_client, transacao_assinada):
+    """Voto em sessao encerrada deve ser rejeitado pela validacao temporal."""
+    client, estado = app_client
+    _criar_votacao_ativa(estado)
+    encerrar_votacao("vot1", caminho=estado.caminho_votacoes)
+    resp = client.post("/transacao", json=transacao_assinada.to_dict())
+    assert resp.status_code == 400
 
 
 def test_post_transacao_invalida_sem_assinatura(app_client, transacao_sem_assinatura):
@@ -103,6 +127,7 @@ def test_post_transacao_json_ausente(app_client):
 
 def test_post_transacao_propaga_para_peers(app_client, transacao_assinada):
     client, estado = app_client
+    _criar_votacao_ativa(estado)
     estado.peers.adicionar("localhost:5001")
     with patch("node.api.threading.Thread") as mock_thread:
         mock_thread.return_value = MagicMock()
@@ -177,12 +202,13 @@ def test_post_bloco_chain_cresce(app_client, transacao_assinada):
 def test_post_minerar_com_transacoes(app_client, transacao_assinada):
     client, estado = app_client
     estado.mempool.adicionar(transacao_assinada)
+    # /minerar usa estado.minerar_pendentes() que importa core.mineracao.minerar_bloco
+    # internamente. Mockamos esse import para retornar um bloco com dificuldade=1.
+    genesis = estado.blocos[0]
+    bloco_fake = minerar_bloco(genesis, [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
     with patch("node.api.threading.Thread") as mock_thread:
         mock_thread.return_value = MagicMock()
-        with patch("node.api.minerar_bloco") as mock_minerar:
-            genesis = estado.blocos[0]
-            bloco_fake = minerar_bloco(genesis, [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
-            mock_minerar.return_value = bloco_fake
+        with patch("core.mineracao.minerar_bloco", return_value=bloco_fake):
             resp = client.post("/minerar")
     assert resp.status_code == 201
     assert "bloco" in resp.get_json()
@@ -198,14 +224,27 @@ def test_post_minerar_sem_transacoes(app_client):
 def test_post_minerar_remove_txs_da_mempool(app_client, transacao_assinada):
     client, estado = app_client
     estado.mempool.adicionar(transacao_assinada)
+    genesis = estado.blocos[0]
+    bloco = minerar_bloco(genesis, [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
     with patch("node.api.threading.Thread") as mock_thread:
         mock_thread.return_value = MagicMock()
-        with patch("node.api.minerar_bloco") as mock_minerar:
-            genesis = estado.blocos[0]
-            bloco = minerar_bloco(genesis, [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
-            mock_minerar.return_value = bloco
+        with patch("core.mineracao.minerar_bloco", return_value=bloco):
             client.post("/minerar")
     assert estado.mempool.tamanho() == 0
+
+
+def test_post_minerar_concorrente_retorna_409(app_client, transacao_assinada):
+    """Quando _mining_lock ja esta segurado, /minerar retorna 409."""
+    client, estado = app_client
+    estado.mempool.adicionar(transacao_assinada)
+    # Segurar o lock para simular mineracao em andamento
+    assert estado._mining_lock.acquire(blocking=False) is True
+    try:
+        resp = client.post("/minerar")
+        assert resp.status_code == 409
+        assert "andamento" in resp.get_json()["erro"].lower()
+    finally:
+        estado._mining_lock.release()
 
 
 # ==================== Peer endpoints ====================
@@ -282,13 +321,83 @@ def test_post_votacao_propagar(app_client):
 
 # ==================== Report and info endpoints ====================
 
-def test_get_relatorio_sem_votos(app_client):
+def test_get_relatorio_sessao_inexistente(app_client):
+    """Sessao nao existe localmente: votacao_ativa() retorna False, vai para o relatorio completo (vazio)."""
     client, estado = app_client
     resp = client.get("/votacao/relatorio/vot1")
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["vencedor"] is None
     assert data["total"] == 0
+
+
+def test_get_relatorio_sessao_ativa_retorna_slim(app_client, transacao_assinada):
+    """Sessao ativa: relatorio retorna payload slim (sem breakdown)."""
+    client, estado = app_client
+    _criar_votacao_ativa(estado)
+    # Adicionar tx confirmada na chain
+    genesis = estado.blocos[0]
+    bloco = minerar_bloco(genesis, [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
+    estado.adicionar_bloco(bloco)
+
+    resp = client.get("/votacao/relatorio/vot1")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Campos slim
+    assert data["ativa"] is True
+    assert data["total_votos_confirmados"] == 1
+    assert data["nome"] == "Eleicao Teste"
+    # Campos do relatorio completo NAO devem estar presentes
+    assert "detalhes" not in data
+    assert "vencedor" not in data
+    assert "blocos_com_votos" not in data
+
+
+def test_get_relatorio_sessao_encerrada_retorna_completo(app_client, transacao_assinada):
+    """Sessao encerrada: relatorio retorna payload completo com breakdown."""
+    client, estado = app_client
+    _criar_votacao_ativa(estado)
+    genesis = estado.blocos[0]
+    bloco = minerar_bloco(genesis, [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
+    estado.adicionar_bloco(bloco)
+    encerrar_votacao("vot1", caminho=estado.caminho_votacoes)
+
+    resp = client.get("/votacao/relatorio/vot1")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_votos_confirmados"] == 1
+    assert data["vencedor"] == "Alice"
+    assert "detalhes" in data
+    assert data["detalhes"]["Alice"]["votos"] == 1
+    assert data["detalhes"]["Alice"]["percentual"] == 100.0
+    assert data["blocos_com_votos"] == 1
+
+
+def test_get_votacao_contagem_zero(app_client):
+    client, estado = app_client
+    resp = client.get("/votacao/contagem/vot1")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["id_votacao"] == "vot1"
+    assert data["total_votos_confirmados"] == 0
+
+
+def test_get_votacao_contagem_com_votos(app_client, transacao_assinada):
+    client, estado = app_client
+    genesis = estado.blocos[0]
+    bloco = minerar_bloco(genesis, [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
+    estado.adicionar_bloco(bloco)
+    resp = client.get("/votacao/contagem/vot1")
+    assert resp.status_code == 200
+    assert resp.get_json()["total_votos_confirmados"] == 1
+
+
+def test_get_votacao_contagem_apenas_chain_nao_mempool(app_client, transacao_assinada):
+    """Votos na mempool nao devem ser contados — apenas on-chain."""
+    client, estado = app_client
+    estado.mempool.adicionar(transacao_assinada)
+    resp = client.get("/votacao/contagem/vot1")
+    assert resp.get_json()["total_votos_confirmados"] == 0
 
 
 def test_get_no_info(app_client):

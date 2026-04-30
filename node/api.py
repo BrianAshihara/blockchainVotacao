@@ -8,8 +8,7 @@ from node.estado import EstadoNo
 from core.transacao import Transacao
 from core.bloco import Bloco
 from core.validacao import validar_transacao, validar_bloco
-from core.cadeia import verificar_integridade, gerar_relatorio
-from core.mineracao import minerar_bloco
+from core.cadeia import verificar_integridade, gerar_relatorio, contar_votos
 from core.cripto import verificar_assinatura
 
 
@@ -64,7 +63,8 @@ def criar_app(estado: EstadoNo) -> Flask:
         dados = request.get_json()
         tx = Transacao.from_dict(dados)
 
-        valida, motivo = validar_transacao(tx, estado.blocos, estado.mempool.listar())
+        valida, motivo = validar_transacao(tx, estado.blocos, estado.mempool.listar(),
+                                              caminho_votacoes=estado.caminho_votacoes)
         if not valida:
             return jsonify({"erro": motivo}), 400
 
@@ -124,13 +124,12 @@ def criar_app(estado: EstadoNo) -> Flask:
         """
         Minera um bloco com as transacoes pendentes na mempool.
         """
-        transacoes = estado.mempool.obter_para_mineracao()
-        if not transacoes:
+        novo_bloco = estado.minerar_pendentes()
+        if novo_bloco is None:
+            if not estado._mining_lock.acquire(blocking=False):
+                return jsonify({"erro": "Mineracao em andamento"}), 409
+            estado._mining_lock.release()
             return jsonify({"erro": "Nenhuma transacao pendente"}), 400
-
-        bloco_anterior = estado.ultimo_bloco()
-        novo_bloco = minerar_bloco(bloco_anterior, transacoes)
-        estado.adicionar_bloco(novo_bloco)
 
         from network.propagacao import propagar_bloco
         threading.Thread(
@@ -230,9 +229,38 @@ def criar_app(estado: EstadoNo) -> Flask:
 
     @app.route("/votacao/relatorio/<id_votacao>", methods=["GET"])
     def relatorio_votacao(id_votacao):
-        """Gera relatorio de votacao."""
-        relatorio = gerar_relatorio(estado.blocos, id_votacao)
+        """
+        Relatorio de votacao.
+        - Sessao ativa: payload slim (apenas contagem total, sem breakdown).
+        - Sessao encerrada: relatorio completo com percentuais e vencedor.
+        """
+        from sistema.votacao import votacao_ativa, _carregar_votacoes
+        votacoes = _carregar_votacoes(estado.caminho_votacoes)
+        dados_votacao = votacoes.get(id_votacao)
+
+        if votacao_ativa(id_votacao, caminho=estado.caminho_votacoes):
+            # Sessao ativa: expor apenas contagem total, sem breakdown por candidato
+            total = contar_votos(estado.blocos, id_votacao)
+            return jsonify({
+                "id_votacao": id_votacao,
+                "nome": dados_votacao.get("nome") if dados_votacao else None,
+                "ativa": True,
+                "inicio": dados_votacao.get("inicio") if dados_votacao else None,
+                "fim": dados_votacao.get("fim") if dados_votacao else None,
+                "total_votos_confirmados": total
+            })
+
+        relatorio = gerar_relatorio(estado.blocos, id_votacao, dados_votacao=dados_votacao)
         return jsonify(relatorio)
+
+    @app.route("/votacao/contagem/<id_votacao>", methods=["GET"])
+    def contagem_votacao(id_votacao):
+        """Contagem leve de votos confirmados on-chain. Publico, qualquer estado."""
+        total = contar_votos(estado.blocos, id_votacao)
+        return jsonify({
+            "id_votacao": id_votacao,
+            "total_votos_confirmados": total
+        })
 
     # --- Node info endpoint ---
 

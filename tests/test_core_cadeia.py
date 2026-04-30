@@ -7,7 +7,7 @@ deteccao de voto duplo, contagem de votos e funcoes utilitarias.
 
 from core.cadeia import (
     criar_bloco_genesis, verificar_integridade, eleitor_ja_votou,
-    gerar_relatorio, ultimo_bloco, comprimento
+    gerar_relatorio, ultimo_bloco, comprimento, contar_votos
 )
 from core.mineracao import minerar_bloco
 
@@ -92,15 +92,61 @@ def test_eleitor_ja_votou_outra_votacao(chain_com_um_bloco, par_chaves):
 def test_gerar_relatorio_contagem_correta(chain_com_dois_blocos):
     relatorio = gerar_relatorio(chain_com_dois_blocos, "vot1")
     assert relatorio["total"] == 2
-    assert relatorio["detalhes"]["Alice"] == 1
-    assert relatorio["detalhes"]["Bob"] == 1
+    # Novo formato: detalhes[opcao] e dict com votos e percentual
+    assert relatorio["detalhes"]["Alice"]["votos"] == 1
+    assert relatorio["detalhes"]["Bob"]["votos"] == 1
+    assert relatorio["detalhes"]["Alice"]["percentual"] == 50.0
+    assert relatorio["detalhes"]["Bob"]["percentual"] == 50.0
+
+
+def test_gerar_relatorio_total_votos_confirmados(chain_com_dois_blocos):
+    """Novo campo total_votos_confirmados deve coincidir com total."""
+    relatorio = gerar_relatorio(chain_com_dois_blocos, "vot1")
+    assert relatorio["total_votos_confirmados"] == 2
+
+
+def test_gerar_relatorio_blocos_com_votos(chain_com_dois_blocos):
+    """Cada bloco com votos da sessao deve ser contado."""
+    relatorio = gerar_relatorio(chain_com_dois_blocos, "vot1")
+    # chain_com_dois_blocos tem 2 blocos minerados, cada um com uma tx vot1
+    assert relatorio["blocos_com_votos"] == 2
+
+
+def test_gerar_relatorio_hash_ultimo_bloco_com_votos(chain_com_dois_blocos):
+    relatorio = gerar_relatorio(chain_com_dois_blocos, "vot1")
+    # ultimo bloco com voto e o ultimo da chain
+    assert relatorio["hash_ultimo_bloco_com_votos"] == chain_com_dois_blocos[-1].hash_atual
 
 
 def test_gerar_relatorio_sem_votos(chain_com_genesis):
     relatorio = gerar_relatorio(chain_com_genesis, "vot_inexistente")
     assert relatorio["vencedor"] is None
     assert relatorio["total"] == 0
+    assert relatorio["total_votos_confirmados"] == 0
     assert relatorio["detalhes"] == {}
+    assert relatorio["blocos_com_votos"] == 0
+    assert relatorio["hash_ultimo_bloco_com_votos"] is None
+
+
+def test_gerar_relatorio_com_dados_votacao_inclui_metadados(chain_com_dois_blocos):
+    """Quando dados_votacao e fornecido, relatorio deve incluir metadados da sessao."""
+    dados = {
+        "nome": "Eleicao Teste",
+        "inicio": "2026-03-20T10:00:00+00:00",
+        "fim": "2026-03-20T18:00:00+00:00",
+        "eleitores": ["a", "b", "c"]
+    }
+    relatorio = gerar_relatorio(chain_com_dois_blocos, "vot1", dados_votacao=dados)
+    assert relatorio["nome_votacao"] == "Eleicao Teste"
+    assert relatorio["inicio"] == "2026-03-20T10:00:00+00:00"
+    assert relatorio["fim"] == "2026-03-20T18:00:00+00:00"
+    assert relatorio["total_eleitores_autorizados"] == 3
+
+
+def test_gerar_relatorio_sem_dados_votacao_nao_inclui_metadados(chain_com_dois_blocos):
+    relatorio = gerar_relatorio(chain_com_dois_blocos, "vot1")
+    assert "nome_votacao" not in relatorio
+    assert "total_eleitores_autorizados" not in relatorio
 
 
 def test_gerar_relatorio_vencedor_correto(
@@ -118,6 +164,30 @@ def test_gerar_relatorio_vencedor_correto(
     relatorio = gerar_relatorio(chain, "vot1")
     assert relatorio["vencedor"] == "Alice"
     assert relatorio["total"] == 3
+    # Percentual deve ser 66.67% para Alice (2/3) e 33.33% para Bob (1/3)
+    assert relatorio["detalhes"]["Alice"]["percentual"] == 66.67
+    assert relatorio["detalhes"]["Bob"]["percentual"] == 33.33
+
+
+# ---- contar_votos ----
+
+def test_contar_votos_chain_vazia(chain_com_genesis):
+    assert contar_votos(chain_com_genesis, "vot1") == 0
+
+
+def test_contar_votos_com_votos(chain_com_dois_blocos):
+    assert contar_votos(chain_com_dois_blocos, "vot1") == 2
+
+
+def test_contar_votos_votacao_inexistente(chain_com_dois_blocos):
+    assert contar_votos(chain_com_dois_blocos, "vot_outra") == 0
+
+
+def test_contar_votos_mais_leve_que_relatorio(chain_com_dois_blocos):
+    """contar_votos deve retornar apenas int, nao calcular detalhes/percentuais."""
+    total = contar_votos(chain_com_dois_blocos, "vot1")
+    assert isinstance(total, int)
+    assert total == 2
 
 
 # ---- ultimo_bloco / comprimento ----

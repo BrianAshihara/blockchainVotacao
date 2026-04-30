@@ -24,6 +24,7 @@ class EstadoNo:
         self.usar_tls = usar_tls
         self.require_auth = require_auth
         self._lock = threading.Lock()
+        self._mining_lock = threading.Lock()
 
         os.makedirs(diretorio_dados, exist_ok=True)
 
@@ -87,3 +88,25 @@ class EstadoNo:
     def comprimento_chain(self) -> int:
         with self._lock:
             return len(self.blocos)
+
+    def minerar_pendentes(self):
+        """
+        Minera transacoes pendentes se houver. Retorna o novo bloco ou None.
+        Usa _mining_lock para impedir mineracao concorrente.
+        """
+        acquired = self._mining_lock.acquire(blocking=False)
+        if not acquired:
+            return None
+
+        try:
+            transacoes = self.mempool.obter_para_mineracao()
+            if not transacoes:
+                return None
+
+            bloco_anterior = self.ultimo_bloco()
+            from core.mineracao import minerar_bloco
+            novo_bloco = minerar_bloco(bloco_anterior, transacoes)
+            self.adicionar_bloco(novo_bloco)
+            return novo_bloco
+        finally:
+            self._mining_lock.release()

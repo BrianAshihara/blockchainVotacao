@@ -36,19 +36,19 @@ def autenticar(login: str, senha: str) -> bool:
 
 
 def tipo_usuario(login: str) -> str | None:
-    """Preservado de sistema.py."""
+    """Retorna o tipo do usuario: master, admin, eleitor ou None."""
     if login == "admin":
-        return "admin"
+        return "master"
     usuarios = _carregar_usuarios()
     return usuarios.get(login, {}).get("tipo", None)
 
 
 def cadastrar_usuario(login: str, senha: str, tipo: str) -> bool:
     """
-    Adaptado de sistema.py.
-    Agora tambem gera par de chaves ECDSA para o usuario.
+    Cadastra usuario com par de chaves ECDSA.
+    Tipos validos: admin, eleitor (master e hardcoded, nunca via cadastro).
     """
-    if tipo not in ["admin", "eleitor", "auditor"]:
+    if tipo not in ["admin", "eleitor"]:
         raise ValueError("Tipo de usuario invalido.")
     usuarios = _carregar_usuarios()
     if login in usuarios:
@@ -65,6 +65,30 @@ def cadastrar_usuario(login: str, senha: str, tipo: str) -> bool:
     return True
 
 
+def autorregistrar_eleitor(login: str, senha: str) -> bool:
+    """Self-registration: qualquer pessoa pode se registrar como eleitor."""
+    return cadastrar_usuario(login, senha, "eleitor")
+
+
+def promover_para_admin(login: str) -> bool:
+    """
+    Promove um eleitor para admin. Sem democao.
+    Retorna False se usuario nao encontrado, ja e admin, ou e master.
+    """
+    if login == "admin":
+        return False
+    usuarios = _carregar_usuarios()
+    if login not in usuarios:
+        return False
+    if usuarios[login].get("tipo") == "admin":
+        return False
+    if usuarios[login].get("tipo") != "eleitor":
+        return False
+    usuarios[login]["tipo"] = "admin"
+    _salvar_usuarios(usuarios)
+    return True
+
+
 def obter_chaves_usuario(login: str) -> tuple[str, str] | None:
     """Retorna (chave_privada, chave_publica) do usuario."""
     usuarios = _carregar_usuarios()
@@ -75,6 +99,12 @@ def obter_chaves_usuario(login: str) -> tuple[str, str] | None:
 
 
 def listar_eleitores() -> list[str]:
-    """Preservado de sistema.py."""
+    """Retorna logins de todos os usuarios com tipo eleitor."""
     usuarios = _carregar_usuarios()
     return [login for login, dados in usuarios.items() if dados["tipo"] == "eleitor"]
+
+
+def listar_admins() -> list[str]:
+    """Retorna logins de todos os usuarios com tipo admin (nao inclui master)."""
+    usuarios = _carregar_usuarios()
+    return [login for login, dados in usuarios.items() if dados["tipo"] == "admin"]

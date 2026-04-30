@@ -255,16 +255,59 @@ class TestIntegracaoRede:
             "Mempool deveria estar vazia apos mineracao"
         )
 
-    def test_08_relatorio_votacao_correto(self, rede):
-        """Relatorio deve mostrar 1 voto para 'Sim'."""
+    def test_08a_relatorio_slim_durante_sessao_ativa(self, rede):
+        """Sessao ativa: relatorio retorna payload slim (apenas total, sem breakdown)."""
         resp = requests.get(f"{URL_A}/votacao/relatorio/{ID_VOTACAO}", timeout=5)
         assert resp.status_code == 200
-        relatorio = resp.json()
-        assert relatorio["detalhes"]["Sim"] == 1
+        slim = resp.json()
+        assert slim["ativa"] is True
+        assert slim["total_votos_confirmados"] == 1
+        # Breakdown NAO deve estar exposto durante sessao ativa
+        assert "detalhes" not in slim
+        assert "vencedor" not in slim
 
-        # Relatorio deve ser identico em qualquer no
-        resp_c = requests.get(f"{URL_C}/votacao/relatorio/{ID_VOTACAO}", timeout=5)
-        assert resp_c.json()["detalhes"]["Sim"] == 1
+    def test_08b_contagem_endpoint_publico(self, rede):
+        """GET /votacao/contagem/<id> retorna apenas total, em qualquer estado."""
+        for url in rede["urls"]:
+            resp = requests.get(f"{url}/votacao/contagem/{ID_VOTACAO}", timeout=5)
+            assert resp.status_code == 200
+            assert resp.json()["total_votos_confirmados"] == 1
+
+    def test_08c_relatorio_completo_apos_encerramento(self, rede):
+        """Apos encerrar sessao e propagar, relatorio completo expoe breakdown e vencedor."""
+        encerramento = {
+            "id_votacao": ID_VOTACAO,
+            "nome": NOME_VOTACAO,
+            "opcoes": OPCOES,
+            "ativa": False,
+        }
+        resp = requests.post(f"{URL_A}/votacao", json=encerramento, timeout=5)
+        assert resp.status_code in (200, 201)
+        requests.post(f"{URL_A}/votacao/propagar", json=encerramento, timeout=5)
+
+        # Aguardar encerramento propagar para todos os nos
+        def encerrada_em_todos():
+            for url in rede["urls"]:
+                r = requests.get(f"{url}/votacao/relatorio/{ID_VOTACAO}", timeout=5)
+                d = r.json()
+                if d.get("ativa") is True:
+                    return False
+            return True
+
+        assert esperar_propagacao(encerrada_em_todos), (
+            "Encerramento nao propagou para todos os nos"
+        )
+
+        # Relatorio completo deve estar disponivel em qualquer no
+        for url in rede["urls"]:
+            resp = requests.get(f"{url}/votacao/relatorio/{ID_VOTACAO}", timeout=5)
+            assert resp.status_code == 200
+            relatorio = resp.json()
+            assert relatorio["detalhes"]["Sim"]["votos"] == 1
+            assert relatorio["detalhes"]["Sim"]["percentual"] == 100.0
+            assert relatorio["vencedor"] == "Sim"
+            assert relatorio["total_votos_confirmados"] == 1
+            assert relatorio["blocos_com_votos"] == 1
 
     def test_09_integridade_chain_todos_nos(self, rede):
         """Chain deve ser valida e integra em todos os nos."""
