@@ -5,6 +5,7 @@ from core.bloco import Bloco
 from core.transacao import Transacao
 
 DIFICULDADE_PADRAO = 4
+DIFICULDADE_MINIMA = 4
 MAX_TRANSACOES_POR_BLOCO = 10
 
 
@@ -34,7 +35,9 @@ def minerar_bloco(bloco_anterior: Bloco, transacoes: List[Transacao],
 
 
 def verificar_pow(bloco: Bloco) -> bool:
-    """Verifica se o PoW do bloco e valido."""
+    #Verifica se o PoW do bloco é valido
+    if bloco.dificuldade < DIFICULDADE_MINIMA:
+        return False
     prefixo = "0" * bloco.dificuldade
     hash_recalculado = bloco.gerar_hash()
     return (bloco.hash_atual == hash_recalculado and

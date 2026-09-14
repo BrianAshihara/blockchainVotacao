@@ -6,13 +6,21 @@ status de sessao, exportacao dict e logica de merge.
 Todos os testes usam tmp_path via parametro `caminho`.
 """
 
+import json
+import threading
+
 import pytest
 
 from sistema.votacao import (
     criar_votacao, listar_votacoes, obter_nome_votacao, encerrar_votacao,
     autorizar_eleitor, eleitor_autorizado, votacao_ativa, opcoes_disponiveis,
-    obter_votacao_dict, obter_todas_votacoes_dict, merge_votacao
+    obter_votacao_dict, obter_todas_votacoes_dict, merge_votacao,
+    chave_autorizada, obter_total_eleitores, votacao_recebida_valida
 )
+from core.cripto import gerar_par_chaves
+
+CHAVE_A = "aa" * 64
+CHAVE_B = "bb" * 64
 
 
 @pytest.fixture
@@ -152,7 +160,49 @@ def test_obter_todas_votacoes_dict(caminho_votacoes):
     assert len(resultado) == 2
 
 
-# ---- merge_votacao ----
+# votacao_recebida_valida
+
+def _votacao_recebida(**campos):
+    dados = {"id_votacao": "v1", "nome": "Teste", "opcoes": ["A", "B"], "ativa": True,
+             "chaves_autorizadas": [gerar_par_chaves()[1]],
+             "inicio": "2026-01-01T10:00:00+00:00", "fim": None}
+    dados.update(campos)
+    return dados
+
+
+def test_votacao_recebida_valida():
+    assert votacao_recebida_valida(_votacao_recebida()) is True
+
+
+def test_votacao_recebida_sem_campos_opcionais():
+    assert votacao_recebida_valida({"id_votacao": "v1", "nome": "Teste", "opcoes": ["A", "B"], "ativa": True})
+
+
+@pytest.mark.parametrize("campos", [
+    {"id_votacao": "../etc"},
+    {"id_votacao": 10},
+    {"nome": "  "},
+    {"opcoes": ["A"]},
+    {"opcoes": ["A", "A"]},
+    {"opcoes": ["A", ""]},
+    {"opcoes": "A,B"},
+    {"ativa": "false"},
+    {"chaves_autorizadas": ["nao-e-chave"]},
+    {"chaves_autorizadas": [CHAVE_A]},
+    {"chaves_autorizadas": "chave"},
+    {"inicio": "ontem"},
+    {"fim": 123},
+])
+def test_votacao_recebida_invalida(campos):
+    assert votacao_recebida_valida(_votacao_recebida(**campos)) is False
+
+
+def test_votacao_recebida_nao_e_dict():
+    assert votacao_recebida_valida(None) is False
+    assert votacao_recebida_valida(["v1"]) is False
+
+
+# merge_votacao
 
 def test_merge_votacao_nova(caminho_votacoes):
     dados = {"id_votacao": "v1", "nome": "Teste", "opcoes": ["A", "B"], "ativa": True}
@@ -174,3 +224,93 @@ def test_merge_votacao_ja_conhecida(caminho_votacoes):
     dados = {"id_votacao": "v1", "nome": "Teste", "opcoes": ["A", "B"], "ativa": True}
     resultado = merge_votacao(dados, caminho=caminho_votacoes)
     assert resultado is False
+
+
+def test_merges_concorrentes_nao_perdem_chaves_nem_corrompem(caminho_votacoes):
+    # Rajada de propagacoes como a que corrompeu o votacoes.json do no B
+    criar_votacao("v1", "Teste", ["A"], caminho=caminho_votacoes)
+    chaves = [f"{i:02x}" * 64 for i in range(40)]
+
+    def receber(chave):
+        merge_votacao({"id_votacao": "v1", "nome": "Teste", "opcoes": ["A"], "ativa": True,
+                       "chaves_autorizadas": [chave]}, caminho=caminho_votacoes)
+
+    threads = [threading.Thread(target=receber, args=(c,)) for c in chaves]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    with open(caminho_votacoes) as f:
+        salvo = json.load(f)
+    assert sorted(salvo["v1"]["chaves_autorizadas"]) == sorted(chaves)
+
+
+# chaves autorizadas (replicadas entre os nos)
+
+def test_autorizar_eleitor_guarda_chave(caminho_votacoes):
+    criar_votacao("v1", "Teste", ["A"], caminho=caminho_votacoes)
+    autorizar_eleitor("v1", "joao", chave_publica=CHAVE_A, caminho=caminho_votacoes)
+    assert chave_autorizada("v1", CHAVE_A, caminho=caminho_votacoes) is True
+    assert eleitor_autorizado("v1", "joao", caminho=caminho_votacoes) is True
+
+
+def test_chave_nao_autorizada(caminho_votacoes):
+    criar_votacao("v1", "Teste", ["A"], caminho=caminho_votacoes)
+    autorizar_eleitor("v1", "joao", chave_publica=CHAVE_A, caminho=caminho_votacoes)
+    assert chave_autorizada("v1", CHAVE_B, caminho=caminho_votacoes) is False
+
+
+def test_chave_autorizada_votacao_inexistente(caminho_votacoes):
+    assert chave_autorizada("nao_existe", CHAVE_A, caminho=caminho_votacoes) is False
+
+
+def test_autorizar_mesmo_login_com_chave_nova(caminho_votacoes):
+    """Login ja autorizado mas chave nova (ex: sessao antiga) ainda altera o registro."""
+    criar_votacao("v1", "Teste", ["A"], caminho=caminho_votacoes)
+    autorizar_eleitor("v1", "joao", caminho=caminho_votacoes)
+    assert autorizar_eleitor("v1", "joao", chave_publica=CHAVE_A, caminho=caminho_votacoes) is True
+    assert chave_autorizada("v1", CHAVE_A, caminho=caminho_votacoes) is True
+
+
+def test_dict_de_propagacao_leva_as_chaves(caminho_votacoes):
+    criar_votacao("v1", "Teste", ["A"], caminho=caminho_votacoes)
+    autorizar_eleitor("v1", "joao", chave_publica=CHAVE_A, caminho=caminho_votacoes)
+    d = obter_votacao_dict("v1", caminho=caminho_votacoes)
+    assert d["chaves_autorizadas"] == [CHAVE_A]
+    assert "eleitores" not in d
+
+
+def test_merge_une_chaves_autorizadas(caminho_votacoes):
+    """Autorizacao feita em outro no chega por propagacao e passa a valer aqui."""
+    criar_votacao("v1", "Teste", ["A"], caminho=caminho_votacoes)
+    autorizar_eleitor("v1", "joao", chave_publica=CHAVE_A, caminho=caminho_votacoes)
+
+    dados = {"id_votacao": "v1", "nome": "Teste", "opcoes": ["A"], "ativa": True,
+             "chaves_autorizadas": [CHAVE_B]}
+    assert merge_votacao(dados, caminho=caminho_votacoes) is True
+    assert chave_autorizada("v1", CHAVE_A, caminho=caminho_votacoes) is True
+    assert chave_autorizada("v1", CHAVE_B, caminho=caminho_votacoes) is True
+    assert merge_votacao(dados, caminho=caminho_votacoes) is False
+
+
+def test_merge_de_votacao_nova_traz_as_chaves(caminho_votacoes):
+    dados = {"id_votacao": "v1", "nome": "Teste", "opcoes": ["A"], "ativa": True,
+             "chaves_autorizadas": [CHAVE_A]}
+    merge_votacao(dados, caminho=caminho_votacoes)
+    assert chave_autorizada("v1", CHAVE_A, caminho=caminho_votacoes) is True
+    assert obter_total_eleitores("v1", caminho=caminho_votacoes) == 1
+
+
+def test_total_eleitores_conta_chaves(caminho_votacoes):
+    criar_votacao("v1", "Teste", ["A"], caminho=caminho_votacoes)
+    autorizar_eleitor("v1", "joao", chave_publica=CHAVE_A, caminho=caminho_votacoes)
+    autorizar_eleitor("v1", "maria", chave_publica=CHAVE_B, caminho=caminho_votacoes)
+    assert obter_total_eleitores("v1", caminho=caminho_votacoes) == 2
+
+
+def test_total_eleitores_sessao_antiga_sem_chaves(caminho_votacoes):
+    """Retrocompatibilidade: sessao criada antes das chaves conta pelos logins."""
+    criar_votacao("v1", "Teste", ["A"], caminho=caminho_votacoes)
+    autorizar_eleitor("v1", "joao", caminho=caminho_votacoes)
+    assert obter_total_eleitores("v1", caminho=caminho_votacoes) == 1

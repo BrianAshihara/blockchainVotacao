@@ -6,6 +6,7 @@ import os
 import time
 
 from node.estado import EstadoNo
+from node.identidade import IdentidadeNo
 from node.api import criar_app
 from network.sincronizacao import iniciar_sincronizacao, loop_verificacao_peers
 
@@ -15,8 +16,8 @@ logging.basicConfig(
 )
 
 
-def loop_mineracao_automatica(estado, intervalo: int = 30):
-    """Daemon que minera automaticamente a cada intervalo se houver txs pendentes."""
+def loop_mineracao_automatica(estado, intervalo: int = 10):
+    # Daemon que minera automaticamente a cada intervalo se houver txs pendentes.
     logger = logging.getLogger("auto_miner")
     while True:
         time.sleep(intervalo)
@@ -53,7 +54,7 @@ def loop_encerramento_automatico(estado, intervalo: int = 30):
             dados = obter_votacao_dict(id_votacao, caminho=estado.caminho_votacoes)
             if dados:
                 from network.propagacao import propagar_votacao
-                propagar_votacao(dados, estado.peers.listar(), estado.porta, estado.usar_tls)
+                propagar_votacao(dados, estado.peers.listar(), estado.porta, estado.identidade, estado.usar_tls)
 
 
 def main():
@@ -65,7 +66,20 @@ def main():
     parser.add_argument("--tls-cert", type=str, default=None, help="Caminho do certificado TLS (PEM)")
     parser.add_argument("--tls-key", type=str, default=None, help="Caminho da chave privada TLS (PEM)")
     parser.add_argument("--require-auth", action="store_true", help="Exigir autenticacao assinada no registro de peers")
+    parser.add_argument("--intervalo-mineracao", type=int, default=10,
+                        help="Segundos entre as tentativas de mineracao automatica (default: 10)")
+    parser.add_argument("--nos-confiaveis", nargs="*", default=[],
+                        help="Chaves publicas dos nos autorizados a enviar sessoes de votacao (ficam salvas)")
+    parser.add_argument("--mostrar-chave", action="store_true",
+                        help="Mostra a chave publica deste no e sai")
     args = parser.parse_args()
+    if args.intervalo_mineracao < 1:
+        parser.error("--intervalo-mineracao deve ser pelo menos 1")
+
+    if args.mostrar_chave:
+        identidade = IdentidadeNo(caminho_arquivo=os.path.join(args.dados, "node_identity.json"))
+        print(identidade.chave_publica)
+        return
 
     usar_tls = bool(args.tls_cert and args.tls_key)
 
@@ -75,6 +89,14 @@ def main():
         usar_tls=usar_tls,
         require_auth=args.require_auth
     )
+
+    for chave in args.nos_confiaveis:
+        try:
+            estado.nos_confiaveis.adicionar(chave)
+        except ValueError as e:
+            parser.error(str(e))
+    if not estado.nos_confiaveis.listar():
+        logging.warning("Nenhum no confiavel configurado: sessoes de votacao vindas de peers serao recusadas")
 
     endereco_proprio = f"{args.host}:{args.porta}"
 
@@ -116,7 +138,7 @@ def main():
 
     threading.Thread(
         target=loop_mineracao_automatica,
-        args=(estado,),
+        args=(estado, args.intervalo_mineracao),
         daemon=True
     ).start()
 
@@ -128,6 +150,8 @@ def main():
 
     logging.info(f"No iniciado na porta {args.porta} | ID: {estado.identidade.id_no}")
     logging.info(f"Peers iniciais: {estado.peers.listar()}")
+    logging.info(f"Mineracao automatica a cada {args.intervalo_mineracao}s")
+    logging.info(f"Nos confiaveis: {len(estado.nos_confiaveis.listar())}")
     if usar_tls:
         logging.info(f"TLS ativado: {args.tls_cert}")
     if args.require_auth:

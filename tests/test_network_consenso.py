@@ -75,6 +75,42 @@ def test_resolver_conflitos_peer_mais_longo_invalido(chain_com_genesis):
     assert resultado is None
 
 
+def test_resolver_conflitos_recusa_chain_com_voto_nao_autorizado(chain_com_dois_blocos, tmp_path):
+    # Com as sessoes locais, uma chain mais longa com voto de chave nao autorizada nao e adotada
+    from sistema.votacao import criar_votacao
+    caminho = str(tmp_path / "votacoes.json")
+    criar_votacao("vot1", "Teste", ["Alice", "Bob"], caminho=caminho)  # ninguem autorizado
+
+    with patch("network.consenso.requests.get") as mock_get:
+        mock_get.side_effect = [
+            _mock_resp({"comprimento": 3}),
+            _mock_resp({"blocos": [b.to_dict() for b in chain_com_dois_blocos]})
+        ]
+        resultado = resolver_conflitos([chain_com_dois_blocos[0]], ["peer1:5000"], caminho_votacoes=caminho)
+
+    assert resultado is None
+
+
+def test_resolver_conflitos_aceita_chain_com_votos_validos(
+    chain_com_dois_blocos, par_chaves, par_chaves_secundario, tmp_path
+):
+    from sistema.votacao import autorizar_eleitor, criar_votacao
+    caminho = str(tmp_path / "votacoes.json")
+    criar_votacao("vot1", "Teste", ["Alice", "Bob"], caminho=caminho)
+    autorizar_eleitor("vot1", "a", chave_publica=par_chaves[1], caminho=caminho)
+    autorizar_eleitor("vot1", "b", chave_publica=par_chaves_secundario[1], caminho=caminho)
+
+    with patch("network.consenso.requests.get") as mock_get:
+        mock_get.side_effect = [
+            _mock_resp({"comprimento": 3}),
+            _mock_resp({"blocos": [b.to_dict() for b in chain_com_dois_blocos]})
+        ]
+        resultado = resolver_conflitos([chain_com_dois_blocos[0]], ["peer1:5000"], caminho_votacoes=caminho)
+
+    assert resultado is not None
+    assert len(resultado) == 3
+
+
 def test_resolver_conflitos_multiplos_peers_escolhe_mais_longo(
     bloco_genesis, transacao_assinada, transacao_assinada_secundaria, fazer_transacao_assinada
 ):

@@ -1,6 +1,7 @@
 import time
 from typing import List
 
+from core import mineracao
 from core.bloco import Bloco
 from core.transacao import Transacao
 
@@ -33,6 +34,9 @@ def verificar_integridade(blocos: List[Bloco]) -> bool:
             return False
 
         if bloco_atual.hash_atual != bloco_atual.gerar_hash():
+            return False
+
+        if bloco_atual.dificuldade < mineracao.DIFICULDADE_MINIMA:
             return False
 
         prefixo = "0" * bloco_atual.dificuldade
@@ -98,7 +102,8 @@ def gerar_relatorio(blocos: List[Bloco], id_votacao: str, dados_votacao: dict = 
         relatorio["nome_votacao"] = dados_votacao.get("nome")
         relatorio["inicio"] = dados_votacao.get("inicio")
         relatorio["fim"] = dados_votacao.get("fim")
-        relatorio["total_eleitores_autorizados"] = len(dados_votacao.get("eleitores", []))
+        autorizados = dados_votacao.get("chaves_autorizadas") or dados_votacao.get("eleitores", [])
+        relatorio["total_eleitores_autorizados"] = len(autorizados)
 
     return relatorio
 

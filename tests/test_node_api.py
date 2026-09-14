@@ -5,21 +5,26 @@ Cobre todos os endpoints Flask via test_client.
 Usa unittest.mock.patch para threads de propagacao (previne HTTP real).
 """
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
+from node.identidade import IdentidadeNo, verificar_mensagem
 from core.transacao import Transacao
 from core.bloco import Bloco
 from core.cripto import gerar_par_chaves, assinar
 from core.mineracao import minerar_bloco
 from core.cadeia import criar_bloco_genesis
-from sistema.votacao import criar_votacao, encerrar_votacao
+from sistema.votacao import autorizar_eleitor, criar_votacao, encerrar_votacao
 
 DIFICULDADE_TESTE = 1
 
 
-def _criar_votacao_ativa(estado, id_votacao="vot1", nome="Eleicao Teste"):
-    """Helper: cria sessao de votacao ativa para que validar_transacao aceite votos."""
+def _criar_votacao_ativa(estado, chave_publica=None, id_votacao="vot1", nome="Eleicao Teste"):
+    """Helper: cria sessao ativa (e autoriza a chave) para validar_transacao aceitar o voto."""
     criar_votacao(id_votacao, nome, ["Alice", "Bob"], caminho=estado.caminho_votacoes)
+    if chave_publica:
+        autorizar_eleitor(id_votacao, "eleitor_teste", chave_publica=chave_publica,
+                          caminho=estado.caminho_votacoes)
 
 
 # ==================== Chain endpoints ====================
@@ -65,7 +70,7 @@ def test_get_chain_integridade_chain_corrompida(app_client, transacao_assinada):
 
 def test_post_transacao_valida(app_client, transacao_assinada):
     client, estado = app_client
-    _criar_votacao_ativa(estado)
+    _criar_votacao_ativa(estado, transacao_assinada.chave_publica)
     with patch("node.api.threading.Thread") as mock_thread:
         mock_thread.return_value = MagicMock()
         resp = client.post("/transacao", json=transacao_assinada.to_dict())
@@ -127,7 +132,7 @@ def test_post_transacao_json_ausente(app_client):
 
 def test_post_transacao_propaga_para_peers(app_client, transacao_assinada):
     client, estado = app_client
-    _criar_votacao_ativa(estado)
+    _criar_votacao_ativa(estado, transacao_assinada.chave_publica)
     estado.peers.adicionar("localhost:5001")
     with patch("node.api.threading.Thread") as mock_thread:
         mock_thread.return_value = MagicMock()
@@ -147,10 +152,11 @@ def test_get_mempool(app_client, transacao_assinada):
     assert len(data["pendentes"]) == 1
 
 
-# ==================== Block endpoints ====================
+# Block endpoints
 
 def test_post_bloco_valido(app_client, transacao_assinada):
     client, estado = app_client
+    _criar_votacao_ativa(estado, transacao_assinada.chave_publica)
     genesis = estado.blocos[0]
     bloco = minerar_bloco(genesis, [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
     resp = client.post("/bloco", json=bloco.to_dict())
@@ -170,16 +176,60 @@ def test_post_bloco_invalido(app_client):
 
 def test_post_bloco_gap_dispara_sincronizacao(app_client, transacao_assinada):
     client, estado = app_client
-    genesis = estado.blocos[0]
-    # Criar bloco com indice 5 (gap grande)
-    bloco = minerar_bloco(genesis, [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
-    bloco.indice = 5
-    bloco.hash_atual = bloco.gerar_hash()
+    # bloco valido de uma cadeia 5 blocos a frente; o conteudo precisa ser valido
+    # (hash e PoW), senao o no nao aceita ressincronizar por causa dele
+    anterior = Bloco(indice=4, timestamp=1.0, transacoes=[], hash_anterior="f" * 64, dificuldade=DIFICULDADE_TESTE)
+    bloco = minerar_bloco(anterior, [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
     with patch("node.api.threading.Thread") as mock_thread:
         mock_thread.return_value = MagicMock()
         resp = client.post("/bloco", json=bloco.to_dict())
     assert resp.status_code == 202
     assert "sincronizando" in resp.get_json()["mensagem"].lower()
+
+
+def test_post_bloco_de_outro_ramo_dispara_sincronizacao(app_client, transacao_assinada, fazer_transacao_assinada):
+    # Bifurcacao: o peer esta num ramo mais longo; o no ressincroniza em vez de so recusar.
+    client, estado = app_client
+    genesis = estado.blocos[0]
+    sk, pk = gerar_par_chaves()
+    estado.adicionar_bloco(minerar_bloco(genesis, [fazer_transacao_assinada(sk, pk)], dificuldade=DIFICULDADE_TESTE))
+
+    ramo_peer_1 = minerar_bloco(genesis, [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
+    ramo_peer_2 = minerar_bloco(ramo_peer_1, [], dificuldade=DIFICULDADE_TESTE)
+    with patch("node.api.threading.Thread") as mock_thread:
+        mock_thread.return_value = MagicMock()
+        resp = client.post("/bloco", json=ramo_peer_2.to_dict())
+    assert resp.status_code == 202
+    mock_thread.assert_called_once()
+
+
+def test_post_bloco_concorrente_na_mesma_altura_mantem_o_primeiro(
+    app_client, transacao_assinada, fazer_transacao_assinada
+):
+    client, estado = app_client
+    genesis = estado.blocos[0]
+    sk, pk = gerar_par_chaves()
+    local = minerar_bloco(genesis, [fazer_transacao_assinada(sk, pk)], dificuldade=DIFICULDADE_TESTE)
+    estado.adicionar_bloco(local)
+
+    concorrente = minerar_bloco(genesis, [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
+    with patch("node.api.threading.Thread") as mock_thread:
+        resp = client.post("/bloco", json=concorrente.to_dict())
+    assert resp.status_code == 400
+    mock_thread.assert_not_called()
+    assert estado.ultimo_bloco().hash_atual == local.hash_atual
+
+
+def test_post_bloco_invalido_nao_dispara_sincronizacao(app_client, transacao_assinada):
+    # Um peer nao pode forcar o download da cadeia mandando bloco com hash falso.
+    client, estado = app_client
+    anterior = Bloco(indice=4, timestamp=1.0, transacoes=[], hash_anterior="f" * 64, dificuldade=DIFICULDADE_TESTE)
+    bloco = minerar_bloco(anterior, [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
+    bloco.hash_atual = "0" * 64
+    with patch("node.api.threading.Thread") as mock_thread:
+        resp = client.post("/bloco", json=bloco.to_dict())
+    assert resp.status_code == 400
+    mock_thread.assert_not_called()
 
 
 def test_post_bloco_json_ausente(app_client):
@@ -190,6 +240,7 @@ def test_post_bloco_json_ausente(app_client):
 
 def test_post_bloco_chain_cresce(app_client, transacao_assinada):
     client, estado = app_client
+    _criar_votacao_ativa(estado, transacao_assinada.chave_publica)
     genesis = estado.blocos[0]
     bloco = minerar_bloco(genesis, [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
     client.post("/bloco", json=bloco.to_dict())
@@ -197,7 +248,45 @@ def test_post_bloco_chain_cresce(app_client, transacao_assinada):
     assert resp.get_json()["comprimento"] == 2
 
 
-# ==================== Mining endpoint ====================
+def test_post_bloco_com_voto_nao_autorizado_recusado_e_ressincroniza(app_client, transacao_assinada):
+    # Recusa o bloco e atualiza as sessoes, caso a autorizacao ainda nao tenha chegado neste no.
+    client, estado = app_client
+    _criar_votacao_ativa(estado)  # sessao existe, mas a chave nao foi autorizada
+    bloco = minerar_bloco(estado.blocos[0], [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
+    with patch("node.api.threading.Thread") as mock_thread:
+        mock_thread.return_value = MagicMock()
+        resp = client.post("/bloco", json=bloco.to_dict())
+    assert resp.status_code == 400
+    assert "autorizado" in resp.get_json()["erro"].lower()
+    mock_thread.assert_called_once()
+    assert estado.comprimento_chain() == 1
+
+
+def test_post_bloco_com_opcao_inexistente_recusado(app_client, par_chaves, fazer_transacao_assinada):
+    client, estado = app_client
+    sk, pk = par_chaves
+    _criar_votacao_ativa(estado, pk)
+    voto = fazer_transacao_assinada(sk, pk, escolha="Carlos")
+    bloco = minerar_bloco(estado.blocos[0], [voto], dificuldade=DIFICULDADE_TESTE)
+    with patch("node.api.threading.Thread") as mock_thread:
+        mock_thread.return_value = MagicMock()
+        resp = client.post("/bloco", json=bloco.to_dict())
+    assert resp.status_code == 400
+    assert "opcao" in resp.get_json()["erro"].lower()
+    assert estado.comprimento_chain() == 1
+
+
+def test_post_transacao_opcao_inexistente(app_client, par_chaves, fazer_transacao_assinada):
+    client, estado = app_client
+    sk, pk = par_chaves
+    _criar_votacao_ativa(estado, pk)
+    voto = fazer_transacao_assinada(sk, pk, escolha="Carlos")
+    resp = client.post("/transacao", json=voto.to_dict())
+    assert resp.status_code == 400
+    assert "opcao" in resp.get_json()["erro"].lower()
+
+
+# Mining endpoint
 
 def test_post_minerar_com_transacoes(app_client, transacao_assinada):
     client, estado = app_client
@@ -278,45 +367,135 @@ def test_get_votacoes_vazio(app_client):
     assert resp.get_json()["votacoes"] == []
 
 
-def test_post_votacao_merge(app_client):
+VOTACAO_PEER = {
+    "id_votacao": "vot1",
+    "nome": "Eleicao Teste",
+    "opcoes": ["Alice", "Bob"],
+    "ativa": True
+}
+
+
+def _no_confiavel(estado, tmp_path, nome="peer.json"):
+    identidade = IdentidadeNo(caminho_arquivo=str(tmp_path / nome))
+    estado.nos_confiaveis.adicionar(identidade.chave_publica)
+    return identidade
+
+
+def _mensagem_votacao(identidade, votacao):
+    return {"votacao": votacao, **identidade.assinar_mensagem(votacao)}
+
+
+def test_post_votacao_merge(app_client, tmp_path):
     client, estado = app_client
-    dados = {
-        "id_votacao": "vot1",
-        "nome": "Eleicao Teste",
-        "opcoes": ["Alice", "Bob"],
-        "ativa": True
-    }
-    resp = client.post("/votacao", json=dados)
+    peer = _no_confiavel(estado, tmp_path)
+    resp = client.post("/votacao", json=_mensagem_votacao(peer, VOTACAO_PEER))
     assert resp.status_code == 201
 
 
-def test_post_votacao_duplicada(app_client):
+def test_post_votacao_duplicada(app_client, tmp_path):
     client, estado = app_client
-    dados = {
-        "id_votacao": "vot1",
-        "nome": "Eleicao Teste",
-        "opcoes": ["Alice", "Bob"],
-        "ativa": True
-    }
-    client.post("/votacao", json=dados)
-    resp = client.post("/votacao", json=dados)
+    peer = _no_confiavel(estado, tmp_path)
+    client.post("/votacao", json=_mensagem_votacao(peer, VOTACAO_PEER))
+    resp = client.post("/votacao", json=_mensagem_votacao(peer, VOTACAO_PEER))
     assert resp.status_code == 200
     assert "conhecida" in resp.get_json()["mensagem"].lower()
 
 
-def test_post_votacao_propagar(app_client):
+def test_post_votacao_sem_assinatura_recusada(app_client):
+    # o ataque antigo: qualquer um encerrava a votacao mandando ativa=false
     client, estado = app_client
-    dados = {
-        "id_votacao": "vot1",
-        "nome": "Eleicao Teste",
-        "opcoes": ["Alice", "Bob"],
-        "ativa": True
-    }
+    criar_votacao("vot1", "Eleicao Teste", ["Alice", "Bob"], caminho=estado.caminho_votacoes)
+    resp = client.post("/votacao", json=dict(VOTACAO_PEER, ativa=False))
+    assert resp.status_code == 401
+    assert client.get("/votacoes").get_json()["votacoes"][0]["ativa"] is True
+
+
+def test_post_votacao_de_no_fora_da_lista_recusada(app_client, tmp_path):
+    client, estado = app_client
+    intruso = IdentidadeNo(caminho_arquivo=str(tmp_path / "intruso.json"))
+    resp = client.post("/votacao", json=_mensagem_votacao(intruso, VOTACAO_PEER))
+    assert resp.status_code == 401
+    assert "confiaveis" in resp.get_json()["erro"]
+    assert client.get("/votacoes").get_json()["votacoes"] == []
+
+
+def test_post_votacao_alterada_depois_de_assinada(app_client, tmp_path):
+    client, estado = app_client
+    peer = _no_confiavel(estado, tmp_path)
+    mensagem = _mensagem_votacao(peer, VOTACAO_PEER)
+    mensagem["votacao"] = dict(VOTACAO_PEER, chaves_autorizadas=[gerar_par_chaves()[1]])
+    resp = client.post("/votacao", json=mensagem)
+    assert resp.status_code == 401
+    assert "Assinatura" in resp.get_json()["erro"]
+
+
+def test_post_votacao_mensagem_antiga_recusada(app_client, tmp_path):
+    client, estado = app_client
+    peer = _no_confiavel(estado, tmp_path)
+    antes = datetime.now(timezone.utc) - timedelta(minutes=10)
+    with patch("node.identidade.datetime") as mock_datetime:
+        mock_datetime.now.return_value = antes
+        mensagem = _mensagem_votacao(peer, VOTACAO_PEER)
+    resp = client.post("/votacao", json=mensagem)
+    assert resp.status_code == 401
+    assert "expirado" in resp.get_json()["erro"].lower()
+
+
+def test_post_votacao_assinatura_malformada(app_client, tmp_path):
+    client, estado = app_client
+    peer = _no_confiavel(estado, tmp_path)
+    mensagem = _mensagem_votacao(peer, VOTACAO_PEER)
+    mensagem["assinatura"] = "nao-e-hex"
+    assert client.post("/votacao", json=mensagem).status_code == 401
+
+
+def test_post_votacao_dados_invalidos_de_no_confiavel(app_client, tmp_path):
+    client, estado = app_client
+    peer = _no_confiavel(estado, tmp_path)
+    invalida = dict(VOTACAO_PEER, opcoes=["Alice"])
+    resp = client.post("/votacao", json=_mensagem_votacao(peer, invalida))
+    assert resp.status_code == 400
+    assert client.get("/votacoes").get_json()["votacoes"] == []
+
+
+def test_get_votacoes_assinado_pelo_no(app_client):
+    client, estado = app_client
+    criar_votacao("vot1", "Eleicao Teste", ["Alice", "Bob"], caminho=estado.caminho_votacoes)
+    dados = client.get("/votacoes").get_json()
+    assert dados["chave_publica"] == estado.identidade.chave_publica
+    assert verificar_mensagem(dados["votacoes"], dados, [estado.identidade.chave_publica]) == (True, "")
+
+
+def test_post_votacao_propagar_rele_sessao_do_disco(app_client):
+    client, estado = app_client
+    criar_votacao("vot1", "Eleicao Teste", ["Alice", "Bob"], caminho=estado.caminho_votacoes)
     with patch("node.api.threading.Thread") as mock_thread:
         mock_thread.return_value = MagicMock()
-        resp = client.post("/votacao/propagar", json=dados)
+        # campos extras no corpo sao ignorados: vale o que esta gravado no no
+        resp = client.post("/votacao/propagar", json={"id_votacao": "vot1", "ativa": False})
     assert resp.status_code == 200
     assert "propagacao" in resp.get_json()["mensagem"].lower()
+    votacao_enviada, _, _, identidade, _ = mock_thread.call_args.kwargs["args"]
+    assert votacao_enviada["ativa"] is True
+    assert identidade is estado.identidade
+
+
+def test_post_votacao_propagar_inexistente(app_client):
+    client, estado = app_client
+    with patch("node.api.threading.Thread") as mock_thread:
+        resp = client.post("/votacao/propagar", json={"id_votacao": "nao_existe"})
+    assert resp.status_code == 404
+    mock_thread.assert_not_called()
+
+
+def test_post_votacao_propagar_de_outra_maquina_recusado(app_client):
+    client, estado = app_client
+    criar_votacao("vot1", "Eleicao Teste", ["Alice", "Bob"], caminho=estado.caminho_votacoes)
+    with patch("node.api.threading.Thread") as mock_thread:
+        resp = client.post("/votacao/propagar", json={"id_votacao": "vot1"},
+                           environ_base={"REMOTE_ADDR": "192.168.1.50"})
+    assert resp.status_code == 403
+    mock_thread.assert_not_called()
 
 
 # ==================== Report and info endpoints ====================

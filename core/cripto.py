@@ -1,5 +1,6 @@
 import hashlib
 from ecdsa import SigningKey, VerifyingKey, SECP256k1, BadSignatureError
+from ecdsa.errors import MalformedPointError
 
 
 def gerar_par_chaves() -> tuple[str, str]:
@@ -29,6 +30,21 @@ def verificar_assinatura(chave_publica_hex: str, dados: str, assinatura_hex: str
         vk.verify(bytes.fromhex(assinatura_hex), dados.encode("utf-8"))
         return True
     except BadSignatureError:
+        return False
+
+
+def chave_publica_valida(chave_publica_hex: str) -> bool:
+    """
+    Verifica se a string e uma chave publica SECP256k1 no mesmo formato
+    gerado por gerar_par_chaves (64 bytes crus, 128 chars hex) e se o ponto
+    pertence a curva.
+    """
+    if not isinstance(chave_publica_hex, str) or len(chave_publica_hex) != 128:
+        return False
+    try:
+        VerifyingKey.from_string(bytes.fromhex(chave_publica_hex), curve=SECP256k1)
+        return True
+    except (ValueError, MalformedPointError):
         return False
 
 

@@ -5,7 +5,7 @@ Cobre geracao de chaves ECDSA, assinatura, verificacao de assinatura
 e derivacao de endereco. Todos os testes usam criptografia real.
 """
 
-from core.cripto import gerar_par_chaves, assinar, verificar_assinatura, gerar_endereco
+from core.cripto import (gerar_par_chaves, assinar, verificar_assinatura, gerar_endereco, chave_publica_valida)
 
 
 # ---- gerar_par_chaves ----
@@ -107,3 +107,29 @@ def test_gerar_endereco_chaves_diferentes(par_chaves, par_chaves_secundario):
     _, pk1 = par_chaves
     _, pk2 = par_chaves_secundario
     assert gerar_endereco(pk1) != gerar_endereco(pk2)
+
+
+# ---- chave_publica_valida ----
+
+def test_chave_publica_valida_aceita_chave_gerada(par_chaves):
+    _, pk = par_chaves
+    assert chave_publica_valida(pk) is True
+
+
+def test_chave_publica_valida_rejeita_ponto_fora_da_curva():
+    assert chave_publica_valida("ff" * 64) is False
+
+
+def test_chave_publica_valida_rejeita_tamanho_errado(par_chaves):
+    _, pk = par_chaves
+    assert chave_publica_valida(pk[:-2]) is False
+    assert chave_publica_valida("04" + pk) is False
+
+
+def test_chave_publica_valida_rejeita_nao_hex():
+    assert chave_publica_valida("zz" * 64) is False
+
+
+def test_chave_publica_valida_rejeita_tipo_errado():
+    assert chave_publica_valida(None) is False
+    assert chave_publica_valida(12345) is False

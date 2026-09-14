@@ -25,7 +25,13 @@ from node.api import criar_app
 DIFICULDADE_TESTE = 1
 
 
-# --------------- Pares de chaves ---------------
+@pytest.fixture(autouse=True)
+def dificuldade_minima_de_teste(monkeypatch):
+    # os testes mineram com dificuldade 1 para serem rapidos; os nos reais continuam exigindo o minimo de producao
+    monkeypatch.setattr("core.mineracao.DIFICULDADE_MINIMA", DIFICULDADE_TESTE)
+
+
+# Pares de chaves
 
 @pytest.fixture
 def par_chaves():
@@ -42,7 +48,7 @@ def par_chaves_terceiro():
     return gerar_par_chaves()
 
 
-# --------------- Transacoes ---------------
+# Transacoes 
 
 @pytest.fixture
 def transacao_assinada(par_chaves):

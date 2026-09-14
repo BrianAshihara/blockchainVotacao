@@ -11,6 +11,7 @@ import requests
 from network.propagacao import (
     propagar_transacao, propagar_bloco, propagar_votacao, registrar_em_peer
 )
+from node.identidade import IdentidadeNo, verificar_mensagem
 
 
 # ==================== propagar_transacao ====================
@@ -87,24 +88,28 @@ def test_propagar_bloco_peer_falha_nao_interrompe(bloco_genesis):
     assert mock_post.call_count == 4
 
 
-# ==================== propagar_votacao ====================
+# propagar_votacao
 
-def test_propagar_votacao_chama_todos_peers():
+def test_propagar_votacao_chama_todos_peers(tmp_path):
+    identidade = IdentidadeNo(caminho_arquivo=str(tmp_path / "identity.json"))
     dados = {"id_votacao": "v1", "nome": "Teste", "opcoes": ["A", "B"], "ativa": True}
     with patch("network.propagacao.requests.post") as mock_post:
-        propagar_votacao(dados, ["peer1:5000", "peer2:5001"], 5000)
+        propagar_votacao(dados, ["peer1:5000", "peer2:5001"], 5000, identidade)
     assert mock_post.call_count == 2
 
 
-def test_propagar_votacao_payload_correto():
+def test_propagar_votacao_payload_assinado_pelo_no(tmp_path):
+    identidade = IdentidadeNo(caminho_arquivo=str(tmp_path / "identity.json"))
     dados = {"id_votacao": "v1", "nome": "Teste", "opcoes": ["A", "B"], "ativa": True}
     with patch("network.propagacao.requests.post") as mock_post:
-        propagar_votacao(dados, ["peer1:5000"], 5000)
-    kwargs = mock_post.call_args[1]
-    assert kwargs["json"] == dados
+        propagar_votacao(dados, ["peer1:5000"], 5000, identidade)
+    payload = mock_post.call_args[1]["json"]
+    assert payload["votacao"] == dados
+    assert payload["chave_publica"] == identidade.chave_publica
+    assert verificar_mensagem(dados, payload, [identidade.chave_publica]) == (True, "")
 
 
-# ==================== registrar_em_peer ====================
+# registrar_em_peer
 
 def test_registrar_em_peer_sucesso():
     with patch("network.propagacao.requests.post") as mock_post:

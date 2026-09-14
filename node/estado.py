@@ -4,10 +4,11 @@ import threading
 from typing import List
 
 from core.bloco import Bloco
-from core.cadeia import criar_bloco_genesis, verificar_integridade
+from core.cadeia import criar_bloco_genesis, eleitor_ja_votou, verificar_integridade
 from core.mempool import Mempool
-from node.identidade import IdentidadeNo
+from node.identidade import IdentidadeNo, NosConfiaveis
 from node.registro_peers import RegistroPeers
+from node.sessoes import RegistroSessoes
 
 
 class EstadoNo:
@@ -25,6 +26,7 @@ class EstadoNo:
         self.require_auth = require_auth
         self._lock = threading.Lock()
         self._mining_lock = threading.Lock()
+        self._sync_lock = threading.Lock()
 
         os.makedirs(diretorio_dados, exist_ok=True)
 
@@ -36,10 +38,16 @@ class EstadoNo:
             caminho=os.path.join(diretorio_dados, "peers.json")
         )
 
+        self.nos_confiaveis = NosConfiaveis(
+            caminho=os.path.join(diretorio_dados, "nos_confiaveis.json")
+        )
+
         self.mempool = Mempool()
 
         self.caminho_votacoes = os.path.join(diretorio_dados, "votacoes.json")
+        self.caminho_usuarios = os.path.join(diretorio_dados, "usuarios.json")
         self.caminho_chain = os.path.join(diretorio_dados, "chain.json")
+        self.sessoes = RegistroSessoes()
         self.blocos: List[Bloco] = self._carregar_ou_criar_chain()
 
     def _carregar_ou_criar_chain(self) -> List[Bloco]:
@@ -64,6 +72,17 @@ class EstadoNo:
     def adicionar_bloco(self, bloco: Bloco) -> bool:
         """Adiciona bloco validado a chain e persiste. Thread-safe."""
         with self._lock:
+            self.blocos.append(bloco)
+            self._salvar_chain()
+            for tx in bloco.transacoes:
+                self.mempool.remover(tx.calcular_hash())
+            return True
+
+    def adicionar_bloco_se_ponta(self, bloco: Bloco) -> bool:
+        with self._lock:
+            ponta = self.blocos[-1]
+            if bloco.indice != ponta.indice + 1 or bloco.hash_anterior != ponta.hash_atual:
+                return False
             self.blocos.append(bloco)
             self._salvar_chain()
             for tx in bloco.transacoes:
@@ -99,14 +118,28 @@ class EstadoNo:
             return None
 
         try:
-            transacoes = self.mempool.obter_para_mineracao()
+            bloco_anterior = self.ultimo_bloco()
+
+            # depois de uma ressincronizacao pode sobrar na mempool voto de quem ja
+            # votou na cadeia vencedora: descarta em vez de minerar voto duplo
+            transacoes = []
+            ja_no_bloco = set()
+            for tx in self.mempool.obter_para_mineracao():
+                eleitor = (tx.chave_publica, tx.id_votacao)
+                if eleitor in ja_no_bloco or eleitor_ja_votou(self.blocos, tx.chave_publica, tx.id_votacao):
+                    self.mempool.remover(tx.calcular_hash())
+                    continue
+                ja_no_bloco.add(eleitor)
+                transacoes.append(tx)
             if not transacoes:
                 return None
 
-            bloco_anterior = self.ultimo_bloco()
             from core.mineracao import minerar_bloco
             novo_bloco = minerar_bloco(bloco_anterior, transacoes)
-            self.adicionar_bloco(novo_bloco)
+
+            # se chegou bloco de outro no durante a prova de trabalho, este ficou velho
+            if not self.adicionar_bloco_se_ponta(novo_bloco):
+                return None
             return novo_bloco
         finally:
             self._mining_lock.release()

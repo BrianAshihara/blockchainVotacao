@@ -3,6 +3,7 @@ import time
 
 import requests
 
+from core.cadeia import eleitor_ja_votou
 from network.consenso import resolver_conflitos
 from network.propagacao import registrar_em_peer
 
@@ -13,7 +14,8 @@ TIMEOUT_REQUISICAO = 10
 def sincronizar_chain(estado) -> bool:
     """
     Sincroniza a chain local com a rede.
-    Chamado no startup e quando um gap de blocos e detectado.
+    Chamado no startup, quando um gap de blocos e detectado e quando chega um
+    bloco valido de outro ramo (bifurcacao).
 
     Tambem recupera transacoes orfas: se a chain local e substituida,
     transacoes que estavam em blocos locais mas NAO estao na nova chain
@@ -21,36 +23,49 @@ def sincronizar_chain(estado) -> bool:
 
     Returns True se a chain foi substituida.
     """
-    peers = estado.peers.listar()
-    if not peers:
-        logger.info("Nenhum peer conhecido. Nada para sincronizar.")
+    # varios blocos fora de ordem podem pedir sincronizacao juntos; basta uma por vez
+    if not estado._sync_lock.acquire(blocking=False):
+        logger.info("Sincronizacao ja em andamento.")
         return False
 
-    nova_chain = resolver_conflitos(estado.blocos, peers, usar_tls=estado.usar_tls)
+    try:
+        peers = estado.peers.listar()
+        if not peers:
+            logger.info("Nenhum peer conhecido. Nada para sincronizar.")
+            return False
 
-    if nova_chain is not None:
-        # Coleta hashes das txs na nova chain
-        tx_hashes_nova = set()
-        for bloco in nova_chain:
-            for tx in bloco.transacoes:
-                tx_hashes_nova.add(tx.calcular_hash())
+        nova_chain = resolver_conflitos(estado.blocos, peers, usar_tls=estado.usar_tls,
+                                        caminho_votacoes=estado.caminho_votacoes)
 
-        # Recupera txs orfas (estavam na chain local mas nao na nova)
-        for bloco in estado.blocos[1:]:  # skip genesis
-            for tx in bloco.transacoes:
-                if tx.calcular_hash() not in tx_hashes_nova:
+        if nova_chain is not None:
+            # Coleta hashes das txs na nova chain
+            tx_hashes_nova = set()
+            for bloco in nova_chain:
+                for tx in bloco.transacoes:
+                    tx_hashes_nova.add(tx.calcular_hash())
+
+            # Recupera txs orfas (estavam na chain local mas nao na nova)
+            for bloco in estado.blocos[1:]:  # skip genesis
+                for tx in bloco.transacoes:
+                    if tx.calcular_hash() in tx_hashes_nova:
+                        continue
+                    # eleitor que ja tem voto no ramo vencedor nao recupera o orfao (seria voto duplo)
+                    if eleitor_ja_votou(nova_chain, tx.chave_publica, tx.id_votacao):
+                        continue
                     estado.mempool.adicionar(tx)
 
-        estado.substituir_chain(nova_chain)
+            estado.substituir_chain(nova_chain)
 
-        # Remove da mempool txs que ja estao na nova chain
-        estado.mempool.remover_varias(list(tx_hashes_nova))
+            # Remove da mempool txs que ja estao na nova chain
+            estado.mempool.remover_varias(list(tx_hashes_nova))
 
-        logger.info(f"Chain substituida. Novo comprimento: {len(nova_chain)}")
-        return True
+            logger.info(f"Chain substituida. Novo comprimento: {len(nova_chain)}")
+            return True
 
-    logger.info("Chain local ja e a mais longa.")
-    return False
+        logger.info("Chain local ja e a mais longa.")
+        return False
+    finally:
+        estado._sync_lock.release()
 
 
 def registrar_nos_peers(estado, endereco_local: str):
@@ -72,7 +87,8 @@ def sincronizar_votacoes(estado):
     Sincroniza sessoes de votacao com os peers.
     GET /votacoes de cada peer, merge local.
     """
-    from sistema.votacao import merge_votacao
+    from node.identidade import verificar_mensagem
+    from sistema.votacao import merge_votacao, votacao_recebida_valida
 
     peers = estado.peers.listar()
     if not peers:
@@ -84,25 +100,41 @@ def sincronizar_votacoes(estado):
         try:
             url = f"{protocolo}://{peer}/votacoes"
             resp = requests.get(url, timeout=TIMEOUT_REQUISICAO)
-            if resp.status_code == 200:
-                dados = resp.json()
-                for votacao in dados.get("votacoes", []):
-                    merge_votacao(votacao, caminho=estado.caminho_votacoes)
-                logger.info(f"Votacoes sincronizadas com {peer}")
-        except requests.exceptions.RequestException as e:
+            if resp.status_code != 200:
+                continue
+            dados = resp.json()
+            votacoes = dados.get("votacoes")
+            # qualquer um pode se registrar como peer, entao so vale resposta assinada por no confiavel
+            autenticada, motivo = verificar_mensagem(votacoes, dados, estado.nos_confiaveis.listar())
+            if not autenticada or not isinstance(votacoes, list):
+                logger.warning(f"Votacoes de {peer} ignoradas: {motivo or 'resposta invalida'}")
+                continue
+            for votacao in votacoes:
+                if not votacao_recebida_valida(votacao):
+                    logger.warning(f"Votacao com dados invalidos ignorada (peer {peer})")
+                    continue
+                merge_votacao(votacao, caminho=estado.caminho_votacoes)
+            logger.info(f"Votacoes sincronizadas com {peer}")
+        except (requests.exceptions.RequestException, ValueError, AttributeError) as e:
             logger.warning(f"Falha ao sincronizar votacoes com {peer}: {e}")
+
+
+def sincronizar_votacoes_e_chain(estado) -> bool:
+    # Atualiza as sessoes e depois a cadeia
+    sincronizar_votacoes(estado)
+    return sincronizar_chain(estado)
 
 
 def iniciar_sincronizacao(estado, endereco_local: str):
     """
     Procedimento completo de startup sync.
     1. Registrar nos peers
-    2. Sincronizar chain
-    3. Sincronizar votacoes
+    2. Sincronizar votacoes (antes da chain: os votos sao validados contra as sessoes)
+    3. Sincronizar chain
     """
     registrar_nos_peers(estado, endereco_local)
-    sincronizar_chain(estado)
     sincronizar_votacoes(estado)
+    sincronizar_chain(estado)
 
 
 def loop_verificacao_peers(estado, endereco_local: str, intervalo: int = 60):

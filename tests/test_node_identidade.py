@@ -7,9 +7,12 @@ salvamento, e integridade das chaves ECDSA. Usa tmp_path para isolamento.
 
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 
-from node.identidade import IdentidadeNo
-from core.cripto import assinar, verificar_assinatura
+import pytest
+
+from node.identidade import IdentidadeNo, NosConfiaveis, _dados_mensagem, verificar_mensagem
+from core.cripto import assinar, gerar_par_chaves, verificar_assinatura
 
 
 def test_criar_nova_identidade(tmp_path):
@@ -90,3 +93,96 @@ def test_duas_instancias_caminhos_diferentes(tmp_path):
     ident1 = IdentidadeNo(caminho_arquivo=str(tmp_path / "id1.json"))
     ident2 = IdentidadeNo(caminho_arquivo=str(tmp_path / "id2.json"))
     assert ident1.id_no != ident2.id_no
+
+
+# mensagens assinadas entre nos
+
+CONTEUDO = {"id_votacao": "v1", "ativa": False}
+
+
+def test_mensagem_assinada_valida(tmp_path):
+    ident = IdentidadeNo(caminho_arquivo=str(tmp_path / "id.json"))
+    mensagem = ident.assinar_mensagem(CONTEUDO)
+    assert verificar_mensagem(CONTEUDO, mensagem, [ident.chave_publica]) == (True, "")
+
+
+def test_mensagem_de_no_nao_confiavel(tmp_path):
+    ident = IdentidadeNo(caminho_arquivo=str(tmp_path / "id.json"))
+    outro = IdentidadeNo(caminho_arquivo=str(tmp_path / "outro.json"))
+    valida, motivo = verificar_mensagem(CONTEUDO, ident.assinar_mensagem(CONTEUDO), [outro.chave_publica])
+    assert valida is False
+    assert "confiaveis" in motivo
+
+
+def test_mensagem_com_conteudo_alterado(tmp_path):
+    ident = IdentidadeNo(caminho_arquivo=str(tmp_path / "id.json"))
+    mensagem = ident.assinar_mensagem(CONTEUDO)
+    valida, motivo = verificar_mensagem({"id_votacao": "v1", "ativa": True}, mensagem, [ident.chave_publica])
+    assert valida is False
+    assert "Assinatura" in motivo
+
+
+def test_mensagem_com_chave_trocada(tmp_path):
+    # assinada por um no, mas declarando a chave de outro que esta na lista
+    ident = IdentidadeNo(caminho_arquivo=str(tmp_path / "id.json"))
+    confiavel = IdentidadeNo(caminho_arquivo=str(tmp_path / "confiavel.json"))
+    mensagem = dict(ident.assinar_mensagem(CONTEUDO), chave_publica=confiavel.chave_publica)
+    assert verificar_mensagem(CONTEUDO, mensagem, [confiavel.chave_publica])[0] is False
+
+
+def test_mensagem_expirada(tmp_path):
+    ident = IdentidadeNo(caminho_arquivo=str(tmp_path / "id.json"))
+    mensagem = ident.assinar_mensagem(CONTEUDO)
+    antigo = (datetime.now(timezone.utc) - timedelta(minutes=6)).isoformat()
+    mensagem["timestamp"] = antigo
+    mensagem["assinatura"] = assinar(ident.chave_privada, _dados_mensagem(CONTEUDO, antigo))
+    valida, motivo = verificar_mensagem(CONTEUDO, mensagem, [ident.chave_publica])
+    assert valida is False
+    assert "expirado" in motivo
+
+
+def test_mensagem_timestamp_sem_fuso(tmp_path):
+    ident = IdentidadeNo(caminho_arquivo=str(tmp_path / "id.json"))
+    mensagem = dict(ident.assinar_mensagem(CONTEUDO), timestamp="2026-01-01T10:00:00")
+    assert verificar_mensagem(CONTEUDO, mensagem, [ident.chave_publica]) == (False, "Timestamp invalido")
+
+
+def test_mensagem_sem_campos_de_assinatura(tmp_path):
+    ident = IdentidadeNo(caminho_arquivo=str(tmp_path / "id.json"))
+    valida, motivo = verificar_mensagem(CONTEUDO, {}, [ident.chave_publica])
+    assert valida is False
+    assert "sem assinatura" in motivo
+
+
+def test_mensagem_assinatura_nao_hex(tmp_path):
+    ident = IdentidadeNo(caminho_arquivo=str(tmp_path / "id.json"))
+    mensagem = dict(ident.assinar_mensagem(CONTEUDO), assinatura="zz")
+    assert verificar_mensagem(CONTEUDO, mensagem, [ident.chave_publica])[0] is False
+
+
+# lista de nos confiaveis
+
+def test_nos_confiaveis_vazio_inicialmente(tmp_path):
+    assert NosConfiaveis(caminho=str(tmp_path / "confiaveis.json")).listar() == []
+
+
+def test_nos_confiaveis_adicionar_e_persistir(tmp_path):
+    caminho = str(tmp_path / "confiaveis.json")
+    _, chave = gerar_par_chaves()
+    assert NosConfiaveis(caminho=caminho).adicionar(chave.upper()) is True
+    assert NosConfiaveis(caminho=caminho).listar() == [chave]
+
+
+def test_nos_confiaveis_adicionar_duplicada(tmp_path):
+    confiaveis = NosConfiaveis(caminho=str(tmp_path / "confiaveis.json"))
+    _, chave = gerar_par_chaves()
+    confiaveis.adicionar(chave)
+    assert confiaveis.adicionar(chave) is False
+    assert len(confiaveis.listar()) == 1
+
+
+def test_nos_confiaveis_recusa_chave_invalida(tmp_path):
+    confiaveis = NosConfiaveis(caminho=str(tmp_path / "confiaveis.json"))
+    with pytest.raises(ValueError):
+        confiaveis.adicionar("abc123")
+    assert confiaveis.listar() == []

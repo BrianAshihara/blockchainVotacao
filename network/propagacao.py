@@ -57,13 +57,12 @@ def propagar_bloco(bloco: Bloco, peers: List[str], porta_local: int,
 
 
 def propagar_votacao(dados_votacao: dict, peers: List[str], porta_local: int,
-                     usar_tls: bool = False):
-    """
-    Envia sessao de votacao para todos os peers.
-    """
+                     identidade, usar_tls: bool = False):
+    # os peers so aceitam a sessao assinada por um no que esteja na lista de confiaveis deles
     for peer in peers:
+        payload = {"votacao": dados_votacao, **identidade.assinar_mensagem(dados_votacao)}
         url = _url_peer(peer, "/votacao", usar_tls)
-        _enviar_com_retry(url, dados_votacao)
+        _enviar_com_retry(url, payload)
 
 
 def registrar_em_peer(endereco_peer: str, endereco_local: str,

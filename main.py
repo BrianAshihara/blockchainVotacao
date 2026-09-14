@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from sistema.autenticacao import (autenticar, tipo_usuario, obter_chaves_usuario, listar_eleitores,
                                   autorregistrar_eleitor, promover_para_admin, listar_admins)
 from sistema.votacao import (criar_votacao, listar_votacoes, encerrar_votacao, autorizar_eleitor,
-                             eleitor_autorizado, votacao_ativa, opcoes_disponiveis, obter_votacao_dict,
+                             eleitor_autorizado, votacao_ativa, opcoes_disponiveis,
                              listar_votacoes_eleitor)
 from core.transacao import Transacao
 from core.cripto import assinar
@@ -22,6 +22,16 @@ NODE_URL = os.environ.get("NODE_URL", "http://localhost:5000")
 
 def _node_url():
     return NODE_URL
+
+
+def _propagar_votacao(id_votacao, aviso):
+    # o no rele a sessao do proprio disco e assina antes de enviar aos peers
+    try:
+        resp = requests.post(f"{_node_url()}/votacao/propagar", json={"id_votacao": id_votacao}, timeout=5)
+        if resp.status_code != 200:
+            typer.echo(f"Aviso: {aviso} ({resp.json().get('erro', 'erro desconhecido')}).")
+    except requests.exceptions.ConnectionError:
+        typer.echo(f"Aviso: no local nao esta rodando, {aviso}.")
 
 
 def autorregistrar_flow():
@@ -141,13 +151,7 @@ def menu_admin(login_input):
             if criar_votacao(id_votacao, nome_votacao.strip(), opcoes_lista,
                              inicio=inicio_iso, fim=fim_iso):
                 typer.echo("Votacao criada.")
-                # Propagar para peers
-                dados_votacao = obter_votacao_dict(id_votacao)
-                if dados_votacao:
-                    try:
-                        requests.post(f"{_node_url()}/votacao/propagar", json=dados_votacao, timeout=5)
-                    except requests.exceptions.ConnectionError:
-                        typer.echo("Aviso: no local nao esta rodando, votacao nao propagada.")
+                _propagar_votacao(id_votacao, "votacao nao propagada")
             else:
                 typer.echo("Votacao ja existe.")
         elif opcao == "3":
@@ -162,13 +166,7 @@ def menu_admin(login_input):
                 pass
             if encerrar_votacao(id_votacao):
                 typer.echo("Votacao encerrada.")
-                # Propagar encerramento para peers
-                dados_votacao = obter_votacao_dict(id_votacao)
-                if dados_votacao:
-                    try:
-                        requests.post(f"{_node_url()}/votacao/propagar", json=dados_votacao, timeout=5)
-                    except requests.exceptions.ConnectionError:
-                        typer.echo("Aviso: no local nao esta rodando, encerramento nao propagado.")
+                _propagar_votacao(id_votacao, "encerramento nao propagado")
             else:
                 typer.echo("Votacao nao encontrada.")
         elif opcao == "4":
@@ -184,8 +182,14 @@ def menu_admin(login_input):
                 typer.echo(f"- {eleitor}")
 
             eleitor_login = typer.prompt("Login do eleitor")
-            if autorizar_eleitor(id_votacao, eleitor_login):
+            chaves_eleitor = obter_chaves_usuario(eleitor_login)
+            if chaves_eleitor is None:
+                typer.echo("Eleitor sem chaves cadastradas.")
+                continue
+            if autorizar_eleitor(id_votacao, eleitor_login, chave_publica=chaves_eleitor[1]):
                 typer.echo("Eleitor autorizado.")
+                # a chave autorizada precisa chegar aos peers para eles aceitarem o voto
+                _propagar_votacao(id_votacao, "autorizacao nao propagada")
             else:
                 typer.echo("Erro ao autorizar eleitor.")
         elif opcao == "5":

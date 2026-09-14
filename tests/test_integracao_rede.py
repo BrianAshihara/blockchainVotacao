@@ -39,6 +39,8 @@ ID_VOTACAO = "integracao_v1"
 NOME_VOTACAO = "Teste de Integracao"
 OPCOES = ["Sim", "Nao", "Abstencao"]
 
+SK_ELEITOR, PK_ELEITOR = gerar_par_chaves()
+
 
 def esperar_no(url, timeout=15):
     """Aguarda ate o no responder em GET /no/info."""
@@ -52,6 +54,15 @@ def esperar_no(url, timeout=15):
             pass
         time.sleep(0.3)
     raise TimeoutError(f"No em {url} nao respondeu em {timeout}s")
+
+
+def _token_master():
+    resp = requests.post(f"{URL_A}/usuario/login", json={"login": "admin", "senha": "admin"}, timeout=5)
+    return resp.json()["token"]
+
+
+def _auth(token):
+    return {"Authorization": f"Bearer {token}"}
 
 
 def esperar_propagacao(condicao_fn, timeout=10, intervalo=0.5):
@@ -77,13 +88,30 @@ def rede(tmp_path_factory):
     python = sys.executable
     projeto = os.path.join(os.path.dirname(__file__), "..")
 
+    # cada no confia nos outros dois, como o operador faria na montagem do cluster
+    chaves = {}
+    for d in (dir_a, dir_b, dir_c):
+        saida = subprocess.run([python, "run_node.py", "--dados", d, "--mostrar-chave"],
+                               cwd=projeto, capture_output=True, text=True, check=True)
+        chaves[d] = saida.stdout.strip()
+
+    def confiaveis(proprio):
+        return ["--nos-confiaveis", *[c for d, c in chaves.items() if d != proprio]]
+
+    # a mineracao automatica fica longe para nao se adiantar ao POST /minerar do test_06
+    sem_auto_mineracao = ["--intervalo-mineracao", "600"]
+
+    # log em arquivo: um PIPE que ninguem le enche e trava o no
+    logs = [open(os.path.join(d, "no.log"), "w") for d in (dir_a, dir_b, dir_c)]
+
     # No A — sem peers (primeiro a iniciar)
     proc_a = subprocess.Popen(
         [python, "run_node.py",
-         "--host", HOST, "--porta", str(PORTA_A), "--dados", dir_a],
+         "--host", HOST, "--porta", str(PORTA_A), "--dados", dir_a, *sem_auto_mineracao,
+         *confiaveis(dir_a)],
         cwd=projeto,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=logs[0],
+        stderr=subprocess.STDOUT,
     )
 
     # Esperar A ficar pronto antes de iniciar B e C
@@ -92,21 +120,21 @@ def rede(tmp_path_factory):
     # No B — peer de A
     proc_b = subprocess.Popen(
         [python, "run_node.py",
-         "--host", HOST, "--porta", str(PORTA_B), "--dados", dir_b,
-         "--peers", f"{HOST}:{PORTA_A}"],
+         "--host", HOST, "--porta", str(PORTA_B), "--dados", dir_b, *sem_auto_mineracao,
+         *confiaveis(dir_b), "--peers", f"{HOST}:{PORTA_A}"],
         cwd=projeto,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=logs[1],
+        stderr=subprocess.STDOUT,
     )
 
     # No C — peers de A e B
     proc_c = subprocess.Popen(
         [python, "run_node.py",
-         "--host", HOST, "--porta", str(PORTA_C), "--dados", dir_c,
-         "--peers", f"{HOST}:{PORTA_A}", f"{HOST}:{PORTA_B}"],
+         "--host", HOST, "--porta", str(PORTA_C), "--dados", dir_c, *sem_auto_mineracao,
+         *confiaveis(dir_c), "--peers", f"{HOST}:{PORTA_A}", f"{HOST}:{PORTA_B}"],
         cwd=projeto,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=logs[2],
+        stderr=subprocess.STDOUT,
     )
 
     esperar_no(URL_B)
@@ -127,6 +155,8 @@ def rede(tmp_path_factory):
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+    for log in logs:
+        log.close()
 
 
 # ---------------------------------------------------------------------------
@@ -161,25 +191,26 @@ class TestIntegracaoRede:
 
     def test_03_votacao_propaga_para_todos_nos(self, rede):
         """Cria votacao no No A e verifica que propaga para B e C."""
-        # Criar sessao de votacao no A
-        dados_votacao = {
-            "id_votacao": ID_VOTACAO,
-            "nome": NOME_VOTACAO,
-            "opcoes": OPCOES,
-            "ativa": True,
-        }
-        resp = requests.post(f"{URL_A}/votacao", json=dados_votacao, timeout=5)
-        assert resp.status_code in (200, 201)
+        token = _token_master()
+        resp = requests.post(f"{URL_A}/votacao/criar", headers=_auth(token), timeout=5,
+                             json={"id_votacao": ID_VOTACAO, "nome": NOME_VOTACAO, "opcoes": OPCOES})
+        assert resp.status_code == 201, resp.json()
 
-        # Propagar via endpoint dedicado
-        requests.post(f"{URL_A}/votacao/propagar", json=dados_votacao, timeout=5)
+        resp = requests.post(f"{URL_A}/usuario/autorregistrar", timeout=5, json={
+            "login": "eleitor_integracao", "senha": "senha123",
+            "chave_publica": PK_ELEITOR, "chave_privada_cifrada": "{}"})
+        assert resp.status_code == 201, resp.json()
 
-        # Aguardar propagacao
+        resp = requests.post(f"{URL_A}/votacao/autorizar", headers=_auth(token), timeout=5,
+                             json={"id_votacao": ID_VOTACAO, "login": "eleitor_integracao"})
+        assert resp.status_code == 200, resp.json()
+
+        # Aguardar propagacao da sessao e da chave autorizada
         def votacao_em_todos():
             for url in [URL_B, URL_C]:
                 resp = requests.get(f"{url}/votacoes", timeout=5)
-                ids = [v["id_votacao"] for v in resp.json().get("votacoes", [])]
-                if ID_VOTACAO not in ids:
+                votacoes = {v["id_votacao"]: v for v in resp.json().get("votacoes", [])}
+                if PK_ELEITOR not in votacoes.get(ID_VOTACAO, {}).get("chaves_autorizadas", []):
                     return False
             return True
 
@@ -187,15 +218,23 @@ class TestIntegracaoRede:
             "Votacao nao propagou para todos os nos em tempo"
         )
 
+    def test_03b_sessao_sem_assinatura_recusada_em_todos_nos(self, rede):
+        # tentativa de encerrar a votacao de fora da rede de nos confiaveis
+        encerramento = {"id_votacao": ID_VOTACAO, "nome": NOME_VOTACAO, "opcoes": OPCOES, "ativa": False}
+        for url in rede["urls"]:
+            resp = requests.post(f"{url}/votacao", json=encerramento, timeout=5)
+            assert resp.status_code == 401, f"No {url} aceitou sessao sem assinatura"
+            votacoes = {v["id_votacao"]: v for v in requests.get(f"{url}/votacoes", timeout=5).json()["votacoes"]}
+            assert votacoes[ID_VOTACAO]["ativa"] is True
+
     def test_04_transacao_aceita_e_na_mempool(self, rede):
         """Cria transacao assinada e submete ao No A."""
-        sk, pk = gerar_par_chaves()
         tx = Transacao(
             id_votacao=ID_VOTACAO,
-            chave_publica=pk,
+            chave_publica=PK_ELEITOR,
             escolha="Sim",
         )
-        tx.assinatura = assinar(sk, tx.dados_para_assinar())
+        tx.assinatura = assinar(SK_ELEITOR, tx.dados_para_assinar())
 
         resp = requests.post(f"{URL_A}/transacao", json=tx.to_dict(), timeout=5)
         assert resp.status_code == 201, f"Transacao rejeitada: {resp.json()}"
@@ -203,6 +242,16 @@ class TestIntegracaoRede:
         # Verificar mempool do No A
         resp = requests.get(f"{URL_A}/mempool", timeout=5)
         assert resp.json()["total"] >= 1
+
+    def test_04b_chave_nao_autorizada_rejeitada_em_todos_nos(self, rede):
+        sk, pk = gerar_par_chaves()
+        tx = Transacao(id_votacao=ID_VOTACAO, chave_publica=pk, escolha="Nao")
+        tx.assinatura = assinar(sk, tx.dados_para_assinar())
+
+        for url in rede["urls"]:
+            resp = requests.post(f"{url}/transacao", json=tx.to_dict(), timeout=5)
+            assert resp.status_code == 400, f"No {url} aceitou voto nao autorizado"
+            assert "autorizado" in resp.json()["erro"].lower()
 
     def test_05_transacao_propaga_para_peers(self, rede):
         """Verifica que a transacao submetida ao A propagou para B e C."""
@@ -275,15 +324,9 @@ class TestIntegracaoRede:
 
     def test_08c_relatorio_completo_apos_encerramento(self, rede):
         """Apos encerrar sessao e propagar, relatorio completo expoe breakdown e vencedor."""
-        encerramento = {
-            "id_votacao": ID_VOTACAO,
-            "nome": NOME_VOTACAO,
-            "opcoes": OPCOES,
-            "ativa": False,
-        }
-        resp = requests.post(f"{URL_A}/votacao", json=encerramento, timeout=5)
-        assert resp.status_code in (200, 201)
-        requests.post(f"{URL_A}/votacao/propagar", json=encerramento, timeout=5)
+        resp = requests.post(f"{URL_A}/votacao/encerrar", headers=_auth(_token_master()), timeout=30,
+                             json={"id_votacao": ID_VOTACAO})
+        assert resp.status_code == 200, resp.json()
 
         # Aguardar encerramento propagar para todos os nos
         def encerrada_em_todos():
@@ -307,6 +350,7 @@ class TestIntegracaoRede:
             assert relatorio["detalhes"]["Sim"]["percentual"] == 100.0
             assert relatorio["vencedor"] == "Sim"
             assert relatorio["total_votos_confirmados"] == 1
+            assert relatorio["total_eleitores_autorizados"] == 1
             assert relatorio["blocos_com_votos"] == 1
 
     def test_09_integridade_chain_todos_nos(self, rede):

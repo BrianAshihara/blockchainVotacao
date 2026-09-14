@@ -11,7 +11,7 @@ import threading
 
 from node.estado import EstadoNo
 from core.mineracao import minerar_bloco
-from core.cadeia import criar_bloco_genesis
+from core.cadeia import criar_bloco_genesis, verificar_integridade
 
 DIFICULDADE_TESTE = 1
 
@@ -160,3 +160,88 @@ def test_thread_safety_adicionar_bloco_concorrente(estado, fazer_transacao_assin
     # Todos devem ter sido adicionados (sem validacao de indice no adicionar_bloco)
     assert len(erros) == 0
     assert estado.comprimento_chain() == 6  # genesis + 5 blocos
+ 
+
+def test_adicionar_bloco_se_ponta_aceita_bloco_que_encaixa(estado, transacao_assinada):
+    bloco = minerar_bloco(estado.blocos[0], [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
+    assert estado.adicionar_bloco_se_ponta(bloco) is True
+    assert estado.comprimento_chain() == 2
+
+
+def test_adicionar_bloco_se_ponta_recusa_concorrente_na_mesma_altura(
+    estado, transacao_assinada, fazer_transacao_assinada
+):
+    """Dois blocos minerados sobre a mesma ponta: so o primeiro entra."""
+    from core.cripto import gerar_par_chaves
+
+    genesis = estado.blocos[0]
+    primeiro = minerar_bloco(genesis, [transacao_assinada], dificuldade=DIFICULDADE_TESTE)
+    sk, pk = gerar_par_chaves()
+    concorrente = minerar_bloco(genesis, [fazer_transacao_assinada(sk, pk)], dificuldade=DIFICULDADE_TESTE)
+
+    assert estado.adicionar_bloco_se_ponta(primeiro) is True
+    assert estado.adicionar_bloco_se_ponta(concorrente) is False
+    assert estado.comprimento_chain() == 2
+    assert estado.ultimo_bloco().hash_atual == primeiro.hash_atual
+
+
+def test_adicionar_bloco_se_ponta_concorrente_entre_threads(estado, fazer_transacao_assinada):
+    """Varios blocos disputando a mesma altura ao mesmo tempo: a cadeia continua integra."""
+    from core.cripto import gerar_par_chaves
+
+    genesis = estado.blocos[0]
+    blocos = []
+    for i in range(10):
+        sk, pk = gerar_par_chaves()
+        blocos.append(minerar_bloco(genesis, [fazer_transacao_assinada(sk, pk, timestamp=float(i + 1))],
+                                    dificuldade=DIFICULDADE_TESTE))
+
+    threads = [threading.Thread(target=estado.adicionar_bloco_se_ponta, args=(b,)) for b in blocos]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert estado.comprimento_chain() == 2
+    assert verificar_integridade(estado.blocos) is True
+
+
+# minerar pendentes 
+
+def test_minerar_descarta_bloco_se_a_ponta_mudou(estado, transacao_assinada, fazer_transacao_assinada):
+    """Chegou bloco de outro no durante a prova de trabalho: o bloco local ficou velho e e descartado."""
+    from unittest.mock import patch
+    from core import mineracao
+    from core.cripto import gerar_par_chaves
+
+    estado.mempool.adicionar(transacao_assinada)
+    sk, pk = gerar_par_chaves()
+    bloco_do_peer = minerar_bloco(estado.blocos[0], [fazer_transacao_assinada(sk, pk)], dificuldade=DIFICULDADE_TESTE)
+    minerar_real = mineracao.minerar_bloco
+
+    def minerar_enquanto_chega_bloco(anterior, transacoes):
+        novo = minerar_real(anterior, transacoes, dificuldade=DIFICULDADE_TESTE)
+        estado.adicionar_bloco_se_ponta(bloco_do_peer)
+        return novo
+
+    with patch("core.mineracao.minerar_bloco", side_effect=minerar_enquanto_chega_bloco):
+        assert estado.minerar_pendentes() is None
+
+    assert estado.comprimento_chain() == 2
+    assert estado.ultimo_bloco().hash_atual == bloco_do_peer.hash_atual
+    # o voto local continua na mempool para entrar no proximo bloco
+    assert estado.mempool.contem(transacao_assinada.calcular_hash()) is True
+
+
+def test_minerar_descarta_voto_de_quem_ja_votou_na_cadeia(
+    estado, par_chaves, transacao_assinada, fazer_transacao_assinada
+):
+    """Voto que sobrou na mempool depois de uma ressincronizacao nao vira voto duplo."""
+    sk, pk = par_chaves
+    estado.adicionar_bloco(minerar_bloco(estado.blocos[0], [transacao_assinada], dificuldade=DIFICULDADE_TESTE))
+    duplicado = fazer_transacao_assinada(sk, pk, id_votacao="vot1", escolha="Bob", timestamp=5.0)
+    estado.mempool.adicionar(duplicado)
+
+    assert estado.minerar_pendentes() is None
+    assert estado.mempool.tamanho() == 0
+    assert estado.comprimento_chain() == 2

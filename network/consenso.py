@@ -5,20 +5,22 @@ import requests
 
 from core.bloco import Bloco
 from core.cadeia import verificar_integridade
+from core.validacao import validar_votos_da_cadeia
 
 logger = logging.getLogger(__name__)
 TIMEOUT_REQUISICAO = 10
 
 
 def resolver_conflitos(blocos_locais: List[Bloco], peers: List[str],
-                       usar_tls: bool = False) -> Optional[List[Bloco]]:
+                       usar_tls: bool = False, caminho_votacoes: str = None) -> Optional[List[Bloco]]:
     """
     Implementa consenso por cadeia mais longa (Nakamoto consensus).
 
     1. Consulta comprimento de cada peer
     2. Para peers com chain mais longa, baixa a chain completa
-    3. Valida integridade da chain recebida
-    4. Se valida e mais longa, retorna como substituta
+    3. Valida integridade da chain recebida (hashes, PoW, dificuldade minima)
+    4. Com caminho_votacoes, valida tambem os votos (sessao, opcao, chave autorizada, voto duplo)
+    5. Se valida e mais longa, retorna como substituta
 
     Returns:
         Nova chain se encontrou uma mais longa e valida, None caso contrario.
@@ -47,12 +49,19 @@ def resolver_conflitos(blocos_locais: List[Bloco], peers: List[str],
             dados = resp_chain.json()
             chain_remota = [Bloco.from_dict(b) for b in dados["blocos"]]
 
-            if verificar_integridade(chain_remota):
-                maior_comprimento = len(chain_remota)
-                melhor_chain = chain_remota
-                logger.info(f"Chain mais longa encontrada em {peer}: {maior_comprimento} blocos")
-            else:
+            if not verificar_integridade(chain_remota):
                 logger.warning(f"Chain invalida recebida de {peer}")
+                continue
+
+            if caminho_votacoes is not None:
+                votos_validos, motivo = validar_votos_da_cadeia(chain_remota, caminho_votacoes)
+                if not votos_validos:
+                    logger.warning(f"Chain de {peer} com voto invalido: {motivo}")
+                    continue
+
+            maior_comprimento = len(chain_remota)
+            melhor_chain = chain_remota
+            logger.info(f"Chain mais longa encontrada em {peer}: {maior_comprimento} blocos")
 
         except requests.exceptions.RequestException as e:
             logger.warning(f"Falha ao consultar peer {peer}: {e}")
