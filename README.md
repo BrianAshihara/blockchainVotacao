@@ -326,11 +326,16 @@ Cada no expoe os seguintes endpoints:
 | GET | `/usuarios` | admin/master | Lista eleitores e admins |
 | POST | `/usuario/promover` | admin/master | Promove eleitor a admin |
 | POST | `/usuario/rebaixar` | master | Rebaixa admin a eleitor |
-| POST | `/votacao/criar` | admin/master | Cria sessao e propaga para os peers |
-| POST | `/votacao/encerrar` | admin/master | Mine-on-close, encerra e propaga |
-| POST | `/votacao/autorizar` | admin/master | Autoriza um eleitor em uma sessao |
+| POST | `/votacao/criar` | admin/master | Cria sessao (quem cria vira o criador) e propaga para os peers |
+| POST | `/votacao/encerrar` | criador/master | Mine-on-close, encerra e propaga |
+| POST | `/votacao/autorizar` | criador/delegado/master | Autoriza um eleitor em uma sessao |
+| POST | `/votacao/autorizar-lote` | criador/delegado/master | Autoriza ate 1000 logins de uma vez e devolve o status de cada um; com `simular: true` so classifica, sem gravar |
+| POST | `/votacao/delegar` | criador/master | Permite que outro admin autorize eleitores na sessao |
+| POST | `/votacao/revogar-delegacao` | criador/master | Retira essa permissao |
 | GET | `/votacao/<id>/eleitores` | admin/master | Eleitores autorizados na sessao |
 | GET | `/eleitor/votacoes` | eleitor | Sessoes em que o eleitor logado esta autorizado |
+
+Cada sessao guarda o login do `criador` e os `delegados` (`{login: {ativo, atualizado_em}}`), que sao propagados junto com ela. Um delegado autoriza eleitores, mas nao delega nem encerra. No merge entre nos vale, para cada admin, a mudanca mais recente (em empate, a revogacao). Como os logins sao locais a cada no, um admin com o mesmo login em outro no recebe as mesmas permissoes; essa e uma simplificacao aceita do prototipo. Sessoes antigas, sem criador, so podem ser geridas pelo master.
 
 As rotas com acesso restrito exigem o header `Authorization: Bearer <token>` recebido no login. Os tokens ficam so em memoria (reiniciar o no exige novo login) e o papel do usuario e conferido no `usuarios.json` a cada requisicao, entao uma promocao vale na hora.
 
@@ -347,7 +352,7 @@ Esta secao resume as mudancas de escopo aplicadas sobre o sistema base. Todas ma
 | Papel | Origem | Permissoes |
 |---|---|---|
 | **master** | Hardcoded (`login: admin` / `senha: admin`) | Todas as acoes de admin e rebaixar admin a eleitor. Nao pode ser cadastrado, removido, promovido nem rebaixado. |
-| **admin** | Eleitor promovido por outro admin ou pelo master | Criar votacoes, autorizar eleitores, encerrar votacoes, minerar, promover outros eleitores, ver relatorios. |
+| **admin** | Eleitor promovido por outro admin ou pelo master | Criar votacoes, gerenciar as que criou (autorizar, delegar, encerrar), autorizar eleitores onde for delegado, minerar, promover outros eleitores, ver relatorios. |
 | **eleitor** | Auto-cadastro via CLI | Listar suas votacoes ativas, votar, ver resultado de sessoes encerradas em que participou. |
 
 > **Rebaixamento so pelo master.** Qualquer admin promove um eleitor, mas so o master volta um admin para eleitor — um admin nao mexe no papel de outro admin. O rebaixado perde o acesso de administrador na hora e volta a votar nas sessoes em que estiver autorizado. O papel `auditor` foi removido — registros existentes com `tipo=auditor` em `usuarios.json` simplesmente nao tem menu disponivel.
@@ -366,7 +371,17 @@ Ao autorizar um eleitor, o no guarda o login (local, usado so para listar as vot
 
 Antes desta mudanca a autorizacao existia apenas no no onde foi feita: `validar_transacao` nao conferia autorizacao nenhuma e o relatorio publico mostrava um numero de eleitores autorizados diferente em cada no.
 
-Limites conhecidos: a propagacao de sessoes nao e autenticada, e `validar_bloco` nao reconfere a autorizacao (checa assinatura, indice, hash e PoW). Fechar isso exigiria transformar a autorizacao numa transacao assinada na propria cadeia.
+A propagacao das sessoes e aceita so de nos confiaveis (secao "Nos confiaveis") e a autorizacao e reconferida nos blocos recebidos e no consenso. O limite que resta: um no confiavel comprometido ainda poderia inserir uma chave. Fechar isso exigiria transformar a autorizacao numa transacao assinada na propria cadeia.
+
+### Posse da votacao e delegacao
+
+Cada sessao guarda quem a criou. So o criador e o master autorizam eleitores e encerram a sessao; os demais admins nao. O criador (ou o master) pode dar a outro admin a permissao de autorizar eleitores naquela sessao e depois revoga-la. O admin delegado nao repassa a permissao nem encerra a sessao, e revogar nao desfaz as autorizacoes que ele ja fez.
+
+Criador e delegados sao propagados com a sessao (detalhes na tabela de endpoints acima). Sessoes criadas antes dessa regra nao tem criador e so o master as gerencia. A CLI grava o criador e aplica as mesmas regras em encerrar e autorizar; conceder e revogar a permissao e feito pelo frontend.
+
+### Autorizacao em lote
+
+`POST /votacao/autorizar-lote` recebe ate 1000 logins (o frontend le de uma planilha `.xlsx`) e classifica cada um: `valido`, `ja_autorizado`, `nao_encontrado`, `sem_chave` ou `repetido`. Com `simular: true` so classifica, para a previa; sem ele, autoriza os validos numa unica gravacao do `votacoes.json` e propaga a sessao aos peers uma vez so, devolvendo `autorizado` nas linhas que entraram. As regras de permissao sao as mesmas da autorizacao individual.
 
 ### Visibilidade do resultado
 
@@ -409,7 +424,7 @@ A trava vale entre threads do mesmo processo; a CLI rodando ao mesmo tempo que o
 ## Tipos de Usuarios (resumo)
 
 - **Master** (hardcoded `admin`/`admin`): mesmo menu do admin, e o unico que rebaixa admin a eleitor. Nao pode ser removido.
-- **Admin**: cria/encerra votacoes (com `inicio`/`fim`), autoriza eleitores, minera, promove outros eleitores, ve relatorios.
+- **Admin**: cria votacoes (com `inicio`/`fim`) e gerencia as que criou (autoriza eleitores, delega a autorizacao a outro admin, encerra), autoriza eleitores onde foi delegado, minera, promove outros eleitores, ve relatorios.
 - **Eleitor**: auto-cadastro, lista suas votacoes ativas autorizadas, vota, ve resultado de sessoes encerradas em que participou.
 
 ---
@@ -419,7 +434,7 @@ A trava vale entre threads do mesmo processo; a CLI rodando ao mesmo tempo que o
 1. **Eleitor** se auto-cadastra na CLI (digitando `REGISTRAR` no campo login).
 2. **Admin** (ou master) cria uma sessao com ID, opcoes, `inicio` e `fim`.
    - A sessao e **propagada automaticamente** para todos os peers.
-3. **Admin** autoriza eleitores para a sessao — a chave publica autorizada e propagada para todos os nos.
+3. **Criador** da sessao (ou um admin delegado por ele, ou o master) autoriza eleitores, um a um ou por planilha — a chave publica autorizada e propagada para todos os nos.
 4. **Eleitor** faz login, lista suas votacoes ativas, escolhe uma e submete o voto.
    - O CLI **assina a transacao localmente** com a chave privada (ECDSA SECP256k1).
    - A chave privada **nunca sai do processo local**.
@@ -453,7 +468,7 @@ A trava vale entre threads do mesmo processo; a CLI rodando ao mesmo tempo que o
 
 ## Testes
 
-O projeto possui **471 testes** (457 unitarios + 14 de integracao), organizados com `pytest`.
+O projeto possui **505 testes** (491 unitarios + 14 de integracao), organizados com `pytest`.
 
 ### Executar os testes
 
@@ -478,15 +493,15 @@ pip install pytest-cov
 python -m pytest tests/ --cov=core --cov=node --cov=network --cov=sistema
 ```
 
-### Cobertura por camada — Testes Unitarios (457)
+### Cobertura por camada — Testes Unitarios (491)
 
 | Camada | Arquivos de Teste | Testes | O que cobre |
 |--------|-------------------|--------|-------------|
 | `core/` | 7 arquivos | 144 | Criptografia ECDSA, transacoes, blocos, cadeia (incluindo `contar_votos` e relatorio enriquecido), validacao (sessao ativa, chave autorizada, opcao existente, dificuldade minima, votos em blocos e cadeias recebidos), mempool, mineracao PoW |
-| `node/` | 6 arquivos | 163 | Identidade e mensagens assinadas entre nos, lista de nos confiaveis, registro de peers, sessoes de login, estado do no com `_mining_lock`, endpoints Flask de blockchain/P2P (inclui bifurcacao, blocos com votos invalidos e sessoes sem assinatura) e do frontend |
+| `node/` | 6 arquivos | 183 | Identidade e mensagens assinadas entre nos, lista de nos confiaveis, registro de peers, sessoes de login, estado do no com `_mining_lock`, endpoints Flask de blockchain/P2P (inclui bifurcacao, blocos com votos invalidos e sessoes sem assinatura) e do frontend (inclui posse da votacao, delegacao e autorizacao em lote) |
 | `network/` | 3 arquivos | 48 | Propagacao HTTP (sessao assinada), consenso Nakamoto (recusa cadeia com voto invalido), sincronizacao com recuperacao de txs orfas, sessoes antes da cadeia e sessoes so de nos confiaveis |
-| `sistema/` | 4 arquivos | 102 | Autenticacao (master hardcoded, auto-cadastro, promocao, rebaixamento), CRUD de votacoes (com inicio/fim, chaves autorizadas e validacao de sessao recebida), gravacao segura dos JSON, exportacao CSV com percentual |
-| **Total** | **20 arquivos** | **457** | **Cobertura completa de todos os modulos** |
+| `sistema/` | 4 arquivos | 116 | Autenticacao (master hardcoded, auto-cadastro, promocao, rebaixamento), CRUD de votacoes (com inicio/fim, chaves autorizadas, criador, delegados com merge pela mudanca mais recente e validacao de sessao recebida), gravacao segura dos JSON, exportacao CSV com percentual |
+| **Total** | **20 arquivos** | **491** | **Cobertura completa de todos os modulos** |
 
 ### Testes de Integracao (14)
 

@@ -1,4 +1,3 @@
-import re
 import threading
 from datetime import datetime, timezone
 
@@ -8,6 +7,7 @@ from flask import Flask, request, jsonify
 from node.estado import EstadoNo
 from node.identidade import verificar_mensagem
 from sistema.votacao import ID_VOTACAO_VALIDO
+from sistema.autenticacao import LOGIN_VALIDO
 from core.transacao import Transacao
 from core.bloco import Bloco
 from core.validacao import validar_transacao, validar_conteudo_bloco, validar_votos_do_bloco
@@ -15,9 +15,9 @@ from core.cadeia import verificar_integridade, gerar_relatorio, contar_votos
 from core.cripto import verificar_assinatura, chave_publica_valida
 
 PAPEIS_ADMIN = ("master", "admin")
-LOGIN_VALIDO = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
 TAMANHO_MINIMO_SENHA = 6
 ENDERECOS_LOCAIS = ("127.0.0.1", "::1")
+LIMITE_LOTE = 1000
 
 
 def _ler_data_iso(valor):
@@ -72,6 +72,14 @@ def criar_app(estado: EstadoNo) -> Flask:
         if tipo_usuario(login, caminho=estado.caminho_usuarios) not in papeis:
             return None, (jsonify({"erro": "Acesso nao permitido para este usuario"}), 403)
         return login, None
+
+    def _permitido_na_votacao(login, id_votacao, papeis):
+        # o master vale em qualquer votacao; os demais dependem do papel nela
+        from sistema.autenticacao import tipo_usuario
+        from sistema.votacao import papel_na_votacao
+        if tipo_usuario(login, caminho=estado.caminho_usuarios) == "master":
+            return True
+        return papel_na_votacao(id_votacao, login, caminho=estado.caminho_votacoes) in papeis
 
     def _propagar_votacao_async(dados_votacao):
         from network.propagacao import propagar_votacao
@@ -422,7 +430,7 @@ def criar_app(estado: EstadoNo) -> Flask:
     @app.route("/votacao/criar", methods=["POST"])
     def criar_votacao_endpoint():
         from sistema.votacao import criar_votacao, obter_votacao_dict
-        _, erro = _usuario_autenticado(PAPEIS_ADMIN)
+        login, erro = _usuario_autenticado(PAPEIS_ADMIN)
         if erro:
             return erro
 
@@ -452,7 +460,7 @@ def criar_app(estado: EstadoNo) -> Flask:
             return jsonify({"erro": "O fim da votacao ja passou"}), 400
 
         criada = criar_votacao(id_votacao, nome, opcoes, inicio=inicio.isoformat(),
-                               fim=fim.isoformat() if fim else None,
+                               fim=fim.isoformat() if fim else None, criador=login,
                                caminho=estado.caminho_votacoes)
         if not criada:
             return jsonify({"erro": "Ja existe uma votacao com este ID"}), 409
@@ -465,7 +473,7 @@ def criar_app(estado: EstadoNo) -> Flask:
     def encerrar_votacao_endpoint():
         from sistema.votacao import encerrar_votacao, obter_votacao_dict
         from network.propagacao import propagar_bloco
-        _, erro = _usuario_autenticado(PAPEIS_ADMIN)
+        login, erro = _usuario_autenticado(PAPEIS_ADMIN)
         if erro:
             return erro
 
@@ -474,6 +482,8 @@ def criar_app(estado: EstadoNo) -> Flask:
         votacao = obter_votacao_dict(id_votacao, caminho=estado.caminho_votacoes)
         if votacao is None:
             return jsonify({"erro": "Votacao nao encontrada"}), 404
+        if not _permitido_na_votacao(login, id_votacao, ("criador",)):
+            return jsonify({"erro": "Apenas o criador da votacao ou o master pode fazer isso"}), 403
         if not votacao["ativa"]:
             return jsonify({"erro": "Votacao ja encerrada"}), 409
 
@@ -498,7 +508,7 @@ def criar_app(estado: EstadoNo) -> Flask:
     def autorizar_eleitor_endpoint():
         from sistema.votacao import autorizar_eleitor, eleitor_autorizado, obter_votacao_dict
         from sistema.autenticacao import obter_usuario_publico, tipo_usuario
-        _, erro = _usuario_autenticado(PAPEIS_ADMIN)
+        autor, erro = _usuario_autenticado(PAPEIS_ADMIN)
         if erro:
             return erro
 
@@ -509,6 +519,8 @@ def criar_app(estado: EstadoNo) -> Flask:
         votacao = obter_votacao_dict(id_votacao, caminho=estado.caminho_votacoes)
         if votacao is None:
             return jsonify({"erro": "Votacao nao encontrada"}), 404
+        if not _permitido_na_votacao(autor, id_votacao, ("criador", "delegado")):
+            return jsonify({"erro": "Voce nao tem permissao para autorizar eleitores nesta votacao"}), 403
         if not votacao["ativa"]:
             return jsonify({"erro": "Votacao ja encerrada"}), 409
         if tipo_usuario(login, caminho=estado.caminho_usuarios) != "eleitor":
@@ -526,6 +538,102 @@ def criar_app(estado: EstadoNo) -> Flask:
         # a chave autorizada precisa chegar aos peers: sem ela, eles rejeitam o voto
         _propagar_votacao_async(obter_votacao_dict(id_votacao, caminho=estado.caminho_votacoes))
         return jsonify({"mensagem": "Eleitor autorizado"})
+
+    @app.route("/votacao/autorizar-lote", methods=["POST"])
+    def autorizar_lote_endpoint():
+        """
+        Autoriza varios eleitores de uma vez (importacao de planilha).
+        Com simular=true so classifica cada login, sem gravar nada, para a previa.
+        """
+        from sistema.votacao import autorizar_eleitores, obter_votacao_dict, _carregar_votacoes
+        from sistema.autenticacao import chaves_publicas_eleitores
+        autor, erro = _usuario_autenticado(PAPEIS_ADMIN)
+        if erro:
+            return erro
+
+        dados = request.get_json(silent=True) or {}
+        id_votacao = str(dados.get("id_votacao", "")).strip()
+        logins = dados.get("logins")
+        simular = dados.get("simular") is True
+
+        votacao = obter_votacao_dict(id_votacao, caminho=estado.caminho_votacoes)
+        if votacao is None:
+            return jsonify({"erro": "Votacao nao encontrada"}), 404
+        if not _permitido_na_votacao(autor, id_votacao, ("criador", "delegado")):
+            return jsonify({"erro": "Voce nao tem permissao para autorizar eleitores nesta votacao"}), 403
+        if not votacao["ativa"]:
+            return jsonify({"erro": "Votacao ja encerrada"}), 409
+        if not isinstance(logins, list) or not all(isinstance(l, str) for l in logins):
+            return jsonify({"erro": "Logins devem ser uma lista de textos"}), 400
+        if not 1 <= len(logins) <= LIMITE_LOTE:
+            return jsonify({"erro": f"Informe de 1 a {LIMITE_LOTE} logins por vez"}), 400
+
+        ja_autorizados = set(_carregar_votacoes(estado.caminho_votacoes)[id_votacao].get("eleitores", []))
+        chaves = chaves_publicas_eleitores(caminho=estado.caminho_usuarios)
+        resultados, validos, vistos = [], [], set()
+        for login in (l.strip() for l in logins):
+            if login in vistos:
+                status = "repetido"
+            elif login not in chaves:
+                status = "nao_encontrado"
+            elif login in ja_autorizados:
+                status = "ja_autorizado"
+            elif not chaves[login]:
+                status = "sem_chave"
+            else:
+                status = "valido"
+                validos.append((login, chaves[login]))
+            vistos.add(login)
+            resultados.append({"login": login, "status": status})
+
+        if not simular and validos:
+            autorizados = set(autorizar_eleitores(id_votacao, validos, caminho=estado.caminho_votacoes))
+            for r in resultados:
+                if r["status"] == "valido":
+                    r["status"] = "autorizado" if r["login"] in autorizados else "ja_autorizado"
+            _propagar_votacao_async(obter_votacao_dict(id_votacao, caminho=estado.caminho_votacoes))
+
+        return jsonify({"resultados": resultados})
+
+    def _alterar_delegacao(ativo):
+        from sistema.votacao import definir_delegado, obter_votacao_dict
+        from sistema.autenticacao import tipo_usuario
+        autor, erro = _usuario_autenticado(PAPEIS_ADMIN)
+        if erro:
+            return erro
+
+        dados = request.get_json(silent=True) or {}
+        id_votacao = str(dados.get("id_votacao", "")).strip()
+        login = str(dados.get("login", "")).strip()
+
+        votacao = obter_votacao_dict(id_votacao, caminho=estado.caminho_votacoes)
+        if votacao is None:
+            return jsonify({"erro": "Votacao nao encontrada"}), 404
+        # delegado nao repassa a delegacao
+        if not _permitido_na_votacao(autor, id_votacao, ("criador",)):
+            return jsonify({"erro": "Apenas o criador da votacao ou o master pode fazer isso"}), 403
+
+        if ativo:
+            if not votacao["ativa"]:
+                return jsonify({"erro": "Votacao ja encerrada"}), 409
+            if tipo_usuario(login, caminho=estado.caminho_usuarios) != "admin" or login == votacao["criador"]:
+                return jsonify({"erro": "Delegacao so pode ser dada a outro admin deste no"}), 400
+
+        if not definir_delegado(id_votacao, login, ativo, caminho=estado.caminho_votacoes):
+            if ativo:
+                return jsonify({"erro": "Admin ja e delegado nesta votacao"}), 409
+            return jsonify({"erro": "Admin nao e delegado nesta votacao"}), 404
+
+        _propagar_votacao_async(obter_votacao_dict(id_votacao, caminho=estado.caminho_votacoes))
+        return jsonify({"mensagem": "Delegacao concedida" if ativo else "Delegacao revogada"})
+
+    @app.route("/votacao/delegar", methods=["POST"])
+    def delegar_autorizacao():
+        return _alterar_delegacao(True)
+
+    @app.route("/votacao/revogar-delegacao", methods=["POST"])
+    def revogar_delegacao():
+        return _alterar_delegacao(False)
 
     @app.route("/votacao/<id_votacao>/eleitores", methods=["GET"])
     def eleitores_votacao(id_votacao):
@@ -550,7 +658,8 @@ def criar_app(estado: EstadoNo) -> Flask:
         votacoes = []
         for id_votacao, _ in listar_votacoes_eleitor(login, caminho=estado.caminho_votacoes):
             dados = obter_votacao_dict(id_votacao, caminho=estado.caminho_votacoes)
-            dados.pop("chaves_autorizadas", None)
+            for campo in ("chaves_autorizadas", "criador", "delegados"):
+                dados.pop(campo, None)
             votacoes.append(dados)
         return jsonify({"votacoes": votacoes})
 

@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 
 from core.cripto import gerar_par_chaves
 from sistema.autenticacao import cadastrar_usuario, hash_senha
-from sistema.votacao import autorizar_eleitor
+from sistema.votacao import autorizar_eleitor, criar_votacao
 
 CHAVE_CIFRADA = '{"versao": 1, "cifra": "abc"}'
 
@@ -520,6 +520,215 @@ def test_votacoes_do_eleitor_sem_autorizacao(app_client):
     _registrar_eleitor(client)
     token = _login(client, "eleitor1", "senha123")
     assert client.get("/eleitor/votacoes", headers=_auth(token)).get_json()["votacoes"] == []
+
+
+# Posse da votacao e delegacao
+
+def _cenario_posse(client):
+    token_dono = _admin_promovido(client, "dono")
+    token_outro = _admin_promovido(client, "outro")
+    _criar_votacao(client, token_dono)
+    _registrar_eleitor(client)
+    return token_dono, token_outro
+
+
+def _post(client, caminho, token, **corpo):
+    resp, _ = _post_sem_propagar(client, caminho, {"id_votacao": "vot1", **corpo}, token)
+    return resp
+
+
+def test_criar_votacao_registra_criador(app_client):
+    client, _ = app_client
+    _cenario_posse(client)
+    votacao = client.get("/votacoes").get_json()["votacoes"][0]
+    assert votacao["criador"] == "dono"
+    assert votacao["delegados"] == {}
+
+
+def test_admin_que_nao_criou_nao_autoriza_nem_encerra(app_client):
+    client, _ = app_client
+    _, token_outro = _cenario_posse(client)
+    assert _post(client, "/votacao/autorizar", token_outro, login="eleitor1").status_code == 403
+    assert _post(client, "/votacao/encerrar", token_outro).status_code == 403
+
+
+def test_criador_autoriza_e_encerra(app_client):
+    client, _ = app_client
+    token_dono, _ = _cenario_posse(client)
+    assert _post(client, "/votacao/autorizar", token_dono, login="eleitor1").status_code == 200
+    assert _post(client, "/votacao/encerrar", token_dono).status_code == 200
+
+
+def test_master_autoriza_e_delega_em_votacao_alheia(app_client):
+    client, _ = app_client
+    _cenario_posse(client)
+    token = _token_master(client)
+    assert _post(client, "/votacao/autorizar", token, login="eleitor1").status_code == 200
+    assert _post(client, "/votacao/delegar", token, login="outro").status_code == 200
+
+
+def test_delegado_autoriza_mas_nao_delega_nem_encerra(app_client):
+    client, _ = app_client
+    token_dono, token_outro = _cenario_posse(client)
+    _admin_promovido(client, "terceiro")
+
+    assert _post(client, "/votacao/delegar", token_dono, login="outro").status_code == 200
+    assert _post(client, "/votacao/autorizar", token_outro, login="eleitor1").status_code == 200
+    assert _post(client, "/votacao/delegar", token_outro, login="terceiro").status_code == 403
+    assert _post(client, "/votacao/encerrar", token_outro).status_code == 403
+
+
+def test_delegacao_propaga_para_peers(app_client):
+    client, _ = app_client
+    token_dono, _ = _cenario_posse(client)
+    resp, mock_thread = _post_sem_propagar(client, "/votacao/delegar",
+                                           {"id_votacao": "vot1", "login": "outro"}, token_dono)
+    assert resp.status_code == 200
+    votacao = mock_thread.call_args.kwargs["args"][0]
+    assert votacao["delegados"]["outro"]["ativo"] is True
+
+
+def test_revogar_delegacao_tira_a_permissao(app_client):
+    client, _ = app_client
+    token_dono, token_outro = _cenario_posse(client)
+    _post(client, "/votacao/delegar", token_dono, login="outro")
+
+    assert _post(client, "/votacao/revogar-delegacao", token_dono, login="outro").status_code == 200
+    assert _post(client, "/votacao/autorizar", token_outro, login="eleitor1").status_code == 403
+    votacao = client.get("/votacoes").get_json()["votacoes"][0]
+    assert votacao["delegados"]["outro"]["ativo"] is False
+
+
+def test_revogar_quem_nao_e_delegado(app_client):
+    client, _ = app_client
+    token_dono, _ = _cenario_posse(client)
+    assert _post(client, "/votacao/revogar-delegacao", token_dono, login="outro").status_code == 404
+
+
+def test_delegar_duplicado(app_client):
+    client, _ = app_client
+    token_dono, _ = _cenario_posse(client)
+    _post(client, "/votacao/delegar", token_dono, login="outro")
+    assert _post(client, "/votacao/delegar", token_dono, login="outro").status_code == 409
+
+
+def test_delegar_so_para_outro_admin(app_client):
+    client, _ = app_client
+    token_dono, _ = _cenario_posse(client)
+    for login in ("eleitor1", "admin", "dono", "ninguem"):
+        assert _post(client, "/votacao/delegar", token_dono, login=login).status_code == 400
+
+
+def test_delegar_em_votacao_encerrada(app_client):
+    client, _ = app_client
+    token_dono, _ = _cenario_posse(client)
+    _post(client, "/votacao/encerrar", token_dono)
+    assert _post(client, "/votacao/delegar", token_dono, login="outro").status_code == 409
+
+
+def test_delegar_em_votacao_inexistente(app_client):
+    client, _ = app_client
+    token = _token_master(client)
+    resp, _ = _post_sem_propagar(client, "/votacao/delegar", {"id_votacao": "nada", "login": "x"}, token)
+    assert resp.status_code == 404
+
+
+def test_votacao_sem_criador_so_o_master_gerencia(app_client):
+    client, estado = app_client
+    criar_votacao("antiga", "Legado", ["A", "B"], caminho=estado.caminho_votacoes)
+    token_adm = _admin_promovido(client, "adm")
+    _registrar_eleitor(client)
+
+    corpo = {"id_votacao": "antiga", "login": "eleitor1"}
+    assert _post_sem_propagar(client, "/votacao/autorizar", corpo, token_adm)[0].status_code == 403
+    assert _post_sem_propagar(client, "/votacao/autorizar", corpo, _token_master(client))[0].status_code == 200
+
+
+def test_votacoes_do_eleitor_nao_expoem_gestao(app_client):
+    client, _ = app_client
+    token_dono, _ = _cenario_posse(client)
+    _post(client, "/votacao/autorizar", token_dono, login="eleitor1")
+    token_eleitor = _login(client, "eleitor1", "senha123")
+    votacao = client.get("/eleitor/votacoes", headers=_auth(token_eleitor)).get_json()["votacoes"][0]
+    assert "criador" not in votacao
+    assert "delegados" not in votacao
+
+
+# Autorizacao em lote
+
+def _cenario_lote(client, estado):
+    token = _token_master(client)
+    _criar_votacao(client, token)
+    _registrar_eleitor(client, "ana")
+    _registrar_eleitor(client, "beto")
+    _registrar_eleitor(client, "caio")
+    cadastrar_usuario("antigo", "senha123", "eleitor", caminho=estado.caminho_usuarios)
+    with open(estado.caminho_usuarios) as f:
+        usuarios = json.load(f)
+    usuarios["antigo"].pop("chave_publica", None)
+    with open(estado.caminho_usuarios, "w") as f:
+        json.dump(usuarios, f)
+    _post(client, "/votacao/autorizar", token, login="caio")
+    return token
+
+
+def _status(resp):
+    return {r["login"]: r["status"] for r in resp.get_json()["resultados"]}
+
+
+def test_lote_simulado_classifica_sem_gravar(app_client):
+    client, estado = app_client
+    token = _cenario_lote(client, estado)
+    resp = _post(client, "/votacao/autorizar-lote", token, simular=True,
+                 logins=["ana", " beto ", "ana", "caio", "ninguem", "antigo"])
+    assert resp.status_code == 200
+    assert resp.get_json()["resultados"][2] == {"login": "ana", "status": "repetido"}
+    assert _status(resp) == {"ana": "repetido", "beto": "valido", "caio": "ja_autorizado",
+                             "ninguem": "nao_encontrado", "antigo": "sem_chave"}
+    eleitores = client.get("/votacao/vot1/eleitores", headers=_auth(token)).get_json()["eleitores"]
+    assert eleitores == ["caio"]
+
+
+def test_lote_autoriza_os_validos_e_propaga_uma_vez(app_client):
+    client, estado = app_client
+    token = _cenario_lote(client, estado)
+    resp, mock_thread = _post_sem_propagar(client, "/votacao/autorizar-lote",
+                                           {"id_votacao": "vot1", "logins": ["ana", "beto", "ninguem"]}, token)
+    assert _status(resp) == {"ana": "autorizado", "beto": "autorizado", "ninguem": "nao_encontrado"}
+    assert mock_thread.call_count == 1
+    assert len(mock_thread.call_args.kwargs["args"][0]["chaves_autorizadas"]) == 3
+    eleitores = client.get("/votacao/vot1/eleitores", headers=_auth(token)).get_json()["eleitores"]
+    assert sorted(eleitores) == ["ana", "beto", "caio"]
+
+
+def test_lote_sem_validos_nao_propaga(app_client):
+    client, estado = app_client
+    token = _cenario_lote(client, estado)
+    resp, mock_thread = _post_sem_propagar(client, "/votacao/autorizar-lote",
+                                           {"id_votacao": "vot1", "logins": ["caio", "ninguem"]}, token)
+    assert resp.status_code == 200
+    assert mock_thread.call_count == 0
+
+
+def test_lote_respeita_permissao_da_votacao(app_client):
+    client, estado = app_client
+    _cenario_lote(client, estado)
+    token_outro = _admin_promovido(client, "outro")
+    assert _post(client, "/votacao/autorizar-lote", token_outro, logins=["ana"]).status_code == 403
+
+
+def test_lote_votacao_encerrada(app_client):
+    client, estado = app_client
+    token = _cenario_lote(client, estado)
+    _post(client, "/votacao/encerrar", token)
+    assert _post(client, "/votacao/autorizar-lote", token, logins=["ana"]).status_code == 409
+
+
+def test_lote_logins_invalidos(app_client):
+    client, estado = app_client
+    token = _cenario_lote(client, estado)
+    for logins in (None, "ana", [1, 2], [], ["x"] * 1001):
+        assert _post(client, "/votacao/autorizar-lote", token, logins=logins).status_code == 400
 
 
 # CORS

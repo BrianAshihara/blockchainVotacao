@@ -1,9 +1,11 @@
 import hashlib
+import re
 
 from core.cripto import gerar_par_chaves
 from sistema.armazenamento import carregar_json, salvar_json, travar
 
 CAMINHO_USUARIOS = "data/usuarios.json"
+LOGIN_VALIDO = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
 
 
 def hash_senha(senha: str) -> str:
@@ -146,6 +148,12 @@ def listar_eleitores(caminho: str = None) -> list[str]:
     """Retorna logins de todos os usuarios com tipo eleitor."""
     usuarios = _carregar_usuarios(caminho)
     return [login for login, dados in usuarios.items() if dados["tipo"] == "eleitor"]
+
+
+def chaves_publicas_eleitores(caminho: str = None) -> dict[str, str | None]:
+    # uma leitura so do arquivo, para a autorizacao em lote
+    usuarios = _carregar_usuarios(caminho)
+    return {login: dados.get("chave_publica") for login, dados in usuarios.items() if dados["tipo"] == "eleitor"}
 
 
 def listar_admins(caminho: str = None) -> list[str]:

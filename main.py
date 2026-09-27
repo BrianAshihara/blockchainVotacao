@@ -10,7 +10,7 @@ from sistema.autenticacao import (autenticar, tipo_usuario, obter_chaves_usuario
                                   autorregistrar_eleitor, promover_para_admin, listar_admins)
 from sistema.votacao import (criar_votacao, listar_votacoes, encerrar_votacao, autorizar_eleitor,
                              eleitor_autorizado, votacao_ativa, opcoes_disponiveis,
-                             listar_votacoes_eleitor)
+                             listar_votacoes_eleitor, papel_na_votacao)
 from core.transacao import Transacao
 from core.cripto import assinar
 
@@ -82,6 +82,10 @@ def login():
         raise typer.Exit()
 
 
+def _permitido_na_votacao(login, id_votacao, papeis):
+    return tipo_usuario(login) == "master" or papel_na_votacao(id_votacao, login) in papeis
+
+
 def exibir_votacoes(apenas_ativas=False):
     votacoes = listar_votacoes(apenas_ativas=apenas_ativas)
     if not votacoes:
@@ -149,7 +153,7 @@ def menu_admin(login_input):
             id_votacao = id_votacao.strip()
             opcoes_lista = [o.strip() for o in opcoes]
             if criar_votacao(id_votacao, nome_votacao.strip(), opcoes_lista,
-                             inicio=inicio_iso, fim=fim_iso):
+                             inicio=inicio_iso, fim=fim_iso, criador=login_input):
                 typer.echo("Votacao criada.")
                 _propagar_votacao(id_votacao, "votacao nao propagada")
             else:
@@ -157,6 +161,9 @@ def menu_admin(login_input):
         elif opcao == "3":
             exibir_votacoes(apenas_ativas=True)
             id_votacao = typer.prompt("ID da votacao a encerrar")
+            if not _permitido_na_votacao(login_input, id_votacao, ("criador",)):
+                typer.echo("Apenas o criador da votacao ou o master pode encerra-la.")
+                continue
             # Minerar votos pendentes antes de encerrar
             try:
                 resp = requests.post(f"{_node_url()}/minerar", timeout=120)
@@ -172,6 +179,9 @@ def menu_admin(login_input):
         elif opcao == "4":
             exibir_votacoes(apenas_ativas=True)
             id_votacao = typer.prompt("ID da votacao")
+            if not _permitido_na_votacao(login_input, id_votacao, ("criador", "delegado")):
+                typer.echo("Voce nao tem permissao para autorizar eleitores nesta votacao.")
+                continue
 
             eleitores = listar_eleitores()
             if not eleitores:

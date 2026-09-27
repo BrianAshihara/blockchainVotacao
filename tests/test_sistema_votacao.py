@@ -15,7 +15,8 @@ from sistema.votacao import (
     criar_votacao, listar_votacoes, obter_nome_votacao, encerrar_votacao,
     autorizar_eleitor, eleitor_autorizado, votacao_ativa, opcoes_disponiveis,
     obter_votacao_dict, obter_todas_votacoes_dict, merge_votacao,
-    chave_autorizada, obter_total_eleitores, votacao_recebida_valida
+    chave_autorizada, obter_total_eleitores, votacao_recebida_valida,
+    papel_na_votacao, definir_delegado
 )
 from core.cripto import gerar_par_chaves
 
@@ -314,3 +315,84 @@ def test_total_eleitores_sessao_antiga_sem_chaves(caminho_votacoes):
     criar_votacao("v1", "Teste", ["A"], caminho=caminho_votacoes)
     autorizar_eleitor("v1", "joao", caminho=caminho_votacoes)
     assert obter_total_eleitores("v1", caminho=caminho_votacoes) == 1
+
+
+# criador e delegados
+
+def _delegacao(ativo, quando):
+    return {"ativo": ativo, "atualizado_em": quando}
+
+
+def _recebida(**extra):
+    return {"id_votacao": "v1", "nome": "E", "opcoes": ["A", "B"], "ativa": True, **extra}
+
+
+def test_papel_na_votacao(caminho_votacoes):
+    criar_votacao("v1", "E", ["A", "B"], criador="dono", caminho=caminho_votacoes)
+    definir_delegado("v1", "ajudante", True, caminho=caminho_votacoes)
+    assert papel_na_votacao("v1", "dono", caminho=caminho_votacoes) == "criador"
+    assert papel_na_votacao("v1", "ajudante", caminho=caminho_votacoes) == "delegado"
+    assert papel_na_votacao("v1", "outro", caminho=caminho_votacoes) is None
+    assert papel_na_votacao("nada", "dono", caminho=caminho_votacoes) is None
+
+
+def test_definir_delegado_sem_mudanca_retorna_false(caminho_votacoes):
+    criar_votacao("v1", "E", ["A", "B"], criador="dono", caminho=caminho_votacoes)
+    assert definir_delegado("v1", "ajudante", False, caminho=caminho_votacoes) is False
+    assert definir_delegado("v1", "ajudante", True, caminho=caminho_votacoes) is True
+    assert definir_delegado("v1", "ajudante", True, caminho=caminho_votacoes) is False
+    assert definir_delegado("v1", "ajudante", False, caminho=caminho_votacoes) is True
+    assert papel_na_votacao("v1", "ajudante", caminho=caminho_votacoes) is None
+
+
+def test_merge_copia_criador_e_delegados(caminho_votacoes):
+    merge_votacao(_recebida(criador="dono", delegados={"aj": _delegacao(True, "2026-01-01T00:00:00+00:00")}),
+                  caminho=caminho_votacoes)
+    assert papel_na_votacao("v1", "dono", caminho=caminho_votacoes) == "criador"
+    assert papel_na_votacao("v1", "aj", caminho=caminho_votacoes) == "delegado"
+
+
+def test_merge_mudanca_mais_recente_prevalece(caminho_votacoes):
+    merge_votacao(_recebida(delegados={"aj": _delegacao(True, "2026-01-01T10:00:00+00:00")}),
+                  caminho=caminho_votacoes)
+
+    antiga = _recebida(delegados={"aj": _delegacao(False, "2026-01-01T09:00:00+00:00")})
+    assert merge_votacao(antiga, caminho=caminho_votacoes) is False
+    assert papel_na_votacao("v1", "aj", caminho=caminho_votacoes) == "delegado"
+
+    nova = _recebida(delegados={"aj": _delegacao(False, "2026-01-01T11:00:00+00:00")})
+    assert merge_votacao(nova, caminho=caminho_votacoes) is True
+    assert papel_na_votacao("v1", "aj", caminho=caminho_votacoes) is None
+
+
+def test_merge_empate_favorece_revogacao(caminho_votacoes):
+    quando = "2026-01-01T10:00:00+00:00"
+    merge_votacao(_recebida(delegados={"aj": _delegacao(True, quando)}), caminho=caminho_votacoes)
+    merge_votacao(_recebida(delegados={"aj": _delegacao(False, quando)}), caminho=caminho_votacoes)
+    assert papel_na_votacao("v1", "aj", caminho=caminho_votacoes) is None
+
+
+def test_merge_nao_troca_criador_existente(caminho_votacoes):
+    criar_votacao("v1", "E", ["A", "B"], criador="dono", caminho=caminho_votacoes)
+    merge_votacao(_recebida(criador="intruso"), caminho=caminho_votacoes)
+    assert papel_na_votacao("v1", "dono", caminho=caminho_votacoes) == "criador"
+    assert papel_na_votacao("v1", "intruso", caminho=caminho_votacoes) is None
+
+
+def test_merge_preenche_criador_de_votacao_antiga(caminho_votacoes):
+    criar_votacao("v1", "E", ["A", "B"], caminho=caminho_votacoes)
+    assert merge_votacao(_recebida(criador="dono"), caminho=caminho_votacoes) is True
+    assert papel_na_votacao("v1", "dono", caminho=caminho_votacoes) == "criador"
+
+
+@pytest.mark.parametrize("extra", [
+    {"criador": "a b"},
+    {"criador": 5},
+    {"delegados": []},
+    {"delegados": {"a b": _delegacao(True, "2026-01-01T00:00:00+00:00")}},
+    {"delegados": {"aj": _delegacao("sim", "2026-01-01T00:00:00+00:00")}},
+    {"delegados": {"aj": _delegacao(True, "2026-01-01T00:00:00")}},
+    {"delegados": {"aj": {"ativo": True}}},
+])
+def test_votacao_recebida_com_gestao_invalida(extra):
+    assert votacao_recebida_valida(_recebida(**extra)) is False
